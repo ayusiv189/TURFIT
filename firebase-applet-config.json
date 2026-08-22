@@ -1,11 +1,12 @@
 {
-  "projectId": "trufit-903e2",
-  "appId": "1:225029913892:web:7ab05a7abe2c95e09187b1",
-  "apiKey": "AIzaSyBD6sRLGsIZN1l0MEtNtXFbOyB1PGmeM1g",
-  "authDomain": "trufit-903e2.firebaseapp.com",
-  "storageBucket": "trufit-903e2.firebasestorage.app",
-  "messagingSenderId": "225029913892",
+  "projectId": "emergent-proxy-kdtd0",
+  "appId": "1:1035147574142:web:a5ac142dabbafb9845912f",
+  "apiKey": "AIzaSyDJlwuOkJHnC3wOAY5O7xRurh5EBtgs60U",
+  "authDomain": "emergent-proxy-kdtd0.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-trufit-f5d35c80-343e-443c-b4d3-2f7e90646f3b",
+  "storageBucket": "emergent-proxy-kdtd0.firebasestorage.app",
+  "messagingSenderId": "1035147574142",
   "measurementId": "",
-  "oAuthClientId": "",
+  "oAuthClientId": "1035147574142-j41jj9l80krlhb60qvhof11qjoljb6vg.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }
