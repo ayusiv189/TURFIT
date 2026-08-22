@@ -1,0 +1,6 @@
+{
+  "name": "TruFit",
+  "description": "Comprehensive sports turf booking, slot management, team squads, matchmaking lobbies, real-time analytics, dues ledger, bill splitting, loyalty rewards, reviews, and interactive maps for turf owners and athletes.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
