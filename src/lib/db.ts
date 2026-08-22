@@ -12,6 +12,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Turf, Arena, Slot, Booking, PaymentTransaction } from '../types';
+import { sanitizeFirestoreData } from './utils';
 
 // ==================== TURFS ====================
 
@@ -24,16 +25,16 @@ export async function createTurf(turfData: Omit<Turf, 'id' | 'createdAt' | 'upda
     createdAt: now,
     updatedAt: now,
   };
-  await setDoc(newDocRef, payload);
+  await setDoc(newDocRef, sanitizeFirestoreData(payload));
   return newDocRef.id;
 }
 
 export async function updateTurf(turfId: string, updates: Partial<Turf>): Promise<void> {
   const docRef = doc(db, 'turfs', turfId);
-  await updateDoc(docRef, {
+  await updateDoc(docRef, sanitizeFirestoreData({
     ...updates,
     updatedAt: new Date().toISOString(),
-  });
+  }));
 }
 
 export async function deleteTurf(turfId: string): Promise<void> {
@@ -65,7 +66,7 @@ export async function createArena(arenaData: Omit<Arena, 'id' | 'createdAt' | 'u
     createdAt: now,
     updatedAt: now,
   };
-  await setDoc(newDocRef, payload);
+  await setDoc(newDocRef, sanitizeFirestoreData(payload));
   return newDocRef.id;
 }
 
@@ -77,10 +78,10 @@ export async function getTurfArenas(turfId: string): Promise<Arena[]> {
 
 export async function updateArena(arenaId: string, updates: Partial<Arena>): Promise<void> {
   const docRef = doc(db, 'arenas', arenaId);
-  await updateDoc(docRef, {
+  await updateDoc(docRef, sanitizeFirestoreData({
     ...updates,
     updatedAt: new Date().toISOString(),
-  });
+  }));
 }
 
 export async function deleteArena(arenaId: string): Promise<void> {
@@ -99,7 +100,7 @@ export async function createSlot(slotData: Omit<Slot, 'id' | 'createdAt' | 'upda
     createdAt: now,
     updatedAt: now,
   };
-  await setDoc(newDocRef, payload);
+  await setDoc(newDocRef, sanitizeFirestoreData(payload));
   return newDocRef.id;
 }
 
@@ -114,7 +115,7 @@ export async function createBulkSlots(slotsData: Array<Omit<Slot, 'id' | 'create
       createdAt: now,
       updatedAt: now,
     };
-    await setDoc(newDocRef, payload);
+    await setDoc(newDocRef, sanitizeFirestoreData(payload));
     count++;
   }
   return count;
@@ -122,10 +123,10 @@ export async function createBulkSlots(slotsData: Array<Omit<Slot, 'id' | 'create
 
 export async function updateSlot(slotId: string, updates: Partial<Slot>): Promise<void> {
   const docRef = doc(db, 'slots', slotId);
-  await updateDoc(docRef, {
+  await updateDoc(docRef, sanitizeFirestoreData({
     ...updates,
     updatedAt: new Date().toISOString(),
-  });
+  }));
 }
 
 export async function deleteSlot(slotId: string): Promise<void> {
@@ -243,17 +244,17 @@ export async function bookSlotWithTransaction(params: CreateBookingParams): Prom
     };
 
     // 1. Create the booking document
-    transaction.set(newBookingRef, bookingData);
+    transaction.set(newBookingRef, sanitizeFirestoreData(bookingData));
 
     // 2. Mark the slot as booked
-    transaction.update(slotDocRef, {
+    transaction.update(slotDocRef, sanitizeFirestoreData({
       status: slotStatus,
       bookingType: bookingType,
       bookedByPlayerId: params.playerId,
       bookedByPlayerName: params.playerName,
       activeBookingId: newBookingRef.id,
       updatedAt: now,
-    });
+    }));
 
     // 3. Create payment transaction record
     const newTxRef = doc(collection(db, 'paymentTransactions'));
@@ -269,7 +270,7 @@ export async function bookSlotWithTransaction(params: CreateBookingParams): Prom
       notes: isPaid ? 'Full online advance payment' : 'Pay at turf desk upon arrival',
       createdAt: now,
     };
-    transaction.set(newTxRef, txData);
+    transaction.set(newTxRef, sanitizeFirestoreData(txData));
 
     return bookingData;
   });

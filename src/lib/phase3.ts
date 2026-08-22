@@ -35,7 +35,7 @@ import {
   TeamMember,
   MatchPlayer,
 } from '../types';
-import { getDayName } from './utils';
+import { getDayName, sanitizeFirestoreData } from './utils';
 
 // ==========================================
 // 1. NOTIFICATIONS ENGINE
@@ -51,7 +51,7 @@ export async function sendNotification(
     isRead: false,
     createdAt: new Date().toISOString(),
   };
-  await setDoc(notifRef, payload);
+  await setDoc(notifRef, sanitizeFirestoreData(payload));
   return notifRef.id;
 }
 
@@ -143,7 +143,7 @@ export async function createTurfReview(params: {
     updatedAt: now,
   };
 
-  await setDoc(reviewRef, reviewData);
+  await setDoc(reviewRef, sanitizeFirestoreData(reviewData));
 
   // Notify owner of new review
   if (booking.ownerId) {
@@ -261,7 +261,7 @@ export async function createOffer(
     createdAt: now,
     updatedAt: now,
   };
-  await setDoc(offerRef, payload);
+  await setDoc(offerRef, sanitizeFirestoreData(payload));
   return offerRef.id;
 }
 
@@ -395,7 +395,7 @@ export async function getUserRewardWallet(userId: string): Promise<UserRewardWal
       lifetimeRedeemed: 0,
       updatedAt: new Date().toISOString(),
     };
-    await setDoc(walletRef, initial);
+    await setDoc(walletRef, sanitizeFirestoreData(initial));
     return initial;
   }
   return snap.data() as UserRewardWallet;
@@ -703,7 +703,7 @@ export async function generateRecurringSlots(params: {
         createdAt: now,
         updatedAt: now,
       };
-      await setDoc(slotRef, slotPayload);
+      await setDoc(slotRef, sanitizeFirestoreData(slotPayload));
       createdCount++;
     }
   }
@@ -727,7 +727,7 @@ export async function generateRecurringSlots(params: {
     slotsGeneratedCount: createdCount,
     createdAt: now,
   };
-  await setDoc(scheduleRef, schedulePayload);
+  await setDoc(scheduleRef, sanitizeFirestoreData(schedulePayload));
 
   return { createdCount, preservedCount };
 }
@@ -784,7 +784,7 @@ export async function initializePaymentSplit(
       updatedAt: now,
     };
 
-    await setDoc(shareDoc, shareData);
+    await setDoc(shareDoc, sanitizeFirestoreData(shareData));
     shares.push(shareData);
 
     // Notify player of payment share due

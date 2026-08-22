@@ -88,3 +88,20 @@ export function readFileAsDataURL(file: File): Promise<string> {
     reader.readAsDataURL(file);
   });
 }
+
+// Sanitize objects before writing to Firestore to eliminate `undefined` fields that cause SDK errors
+export function sanitizeFirestoreData<T extends Record<string, any>>(data: T): T {
+  const result: any = Array.isArray(data) ? [] : {};
+  for (const [key, value] of Object.entries(data)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+      result[key] = sanitizeFirestoreData(value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+

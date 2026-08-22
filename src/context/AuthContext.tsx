@@ -9,6 +9,7 @@ import {
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { UserProfile, UserRole } from '../types';
+import { sanitizeFirestoreData } from '../lib/utils';
 
 interface AuthContextType {
   user: User | null;
@@ -48,10 +49,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const data = userSnap.data() as UserProfile;
         // Sync verified status if changed in Auth
         if (data.emailVerified !== firebaseUser.emailVerified) {
-          await updateDoc(userDocRef, {
-            emailVerified: firebaseUser.emailVerified,
-            updatedAt: new Date().toISOString(),
-          });
+          try {
+            await updateDoc(userDocRef, {
+              emailVerified: firebaseUser.emailVerified,
+              updatedAt: new Date().toISOString(),
+            });
+          } catch {
+            // Ignore minor sync update error if offline
+          }
           data.emailVerified = firebaseUser.emailVerified;
         }
         setProfile(data);
@@ -67,11 +72,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
-        await setDoc(userDocRef, newProfile, { merge: true });
+        try {
+          await setDoc(userDocRef, sanitizeFirestoreData(newProfile), { merge: true });
+        } catch (setErr) {
+          console.warn('Could not persist new user profile to Firestore:', setErr);
+        }
         setProfile(newProfile);
       }
-    } catch (err) {
-      console.error('Error fetching user profile from Firestore:', err);
+    } catch (err: any) {
+      console.warn('Could not fetch user profile from Firestore (using session profile):', err?.message || err);
+      // Construct fallback profile from auth user so the app continues seamlessly
+      const role = (localStorage.getItem('pending_role') as UserRole) || 'PLAYER';
+      const fallbackProfile: UserProfile = {
+        uid: firebaseUser.uid,
+        email: firebaseUser.email || '',
+        displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
+        role: role,
+        emailVerified: firebaseUser.emailVerified,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setProfile((prev) => prev || fallbackProfile);
     }
   };
 
@@ -118,11 +139,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const updateUserProfile = async (updates: Partial<UserProfile>) => {
     if (!user) return;
     const docRef = doc(db, 'users', user.uid);
-    const payload = {
+    const payload = sanitizeFirestoreData({
       ...updates,
       updatedAt: new Date().toISOString(),
-    };
-    await updateDoc(docRef, payload);
+    });
+    try {
+      await updateDoc(docRef, payload);
+    } catch (err) {
+      console.warn('Could not update profile on server:', err);
+    }
     setProfile((prev) => (prev ? { ...prev, ...payload } : null));
   };
 

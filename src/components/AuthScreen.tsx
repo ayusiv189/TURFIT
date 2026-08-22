@@ -12,6 +12,7 @@ import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { useAuth } from '../context/AuthContext';
 import { UserRole, UserProfile } from '../types';
+import { sanitizeFirestoreData } from '../lib/utils';
 import {
   ShieldCheck,
   Mail,
@@ -159,33 +160,40 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
       const result = await signInWithPopup(auth, provider);
       const fbUser = result.user;
 
-      // Check if user doc exists in Firestore, if not create with chosen role
-      const userDocRef = doc(db, 'users', fbUser.uid);
-      const userSnap = await getDoc(userDocRef);
+      // Safely ensure user doc exists in Firestore with chosen role
+      try {
+        const userDocRef = doc(db, 'users', fbUser.uid);
+        const userSnap = await getDoc(userDocRef);
 
-      if (!userSnap.exists()) {
-        const newProfile: UserProfile = {
-          uid: fbUser.uid,
-          email: fbUser.email || '',
-          displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
-          role: role,
-          emailVerified: true,
-          photoURL: fbUser.photoURL || undefined,
-          city: city.trim() || 'Mumbai',
-          preferredSport: role === 'PLAYER' ? preferredSport : undefined,
-          businessName: role === 'OWNER' ? (businessName.trim() || `${fbUser.displayName || 'Owner'}'s Turf`) : undefined,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        await setDoc(userDocRef, newProfile);
+        if (!userSnap.exists()) {
+          const profilePayload: Record<string, any> = {
+            uid: fbUser.uid,
+            email: fbUser.email || '',
+            displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+            role: role,
+            emailVerified: true,
+            photoURL: fbUser.photoURL || '',
+            city: city.trim() || 'Mumbai',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          if (role === 'PLAYER' && preferredSport) {
+            profilePayload.preferredSport = preferredSport;
+          }
+          if (role === 'OWNER') {
+            profilePayload.businessName = businessName.trim() || `${fbUser.displayName || 'Owner'}'s Turf`;
+          }
+          await setDoc(userDocRef, sanitizeFirestoreData(profilePayload), { merge: true });
+        }
+      } catch (firestoreErr) {
+        console.warn('Firestore profile sync note (session active):', firestoreErr);
       }
     } catch (err: any) {
-      console.error('Google Auth error:', err);
-      if (err.code === 'auth/popup-closed-by-user') {
+      if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
+        // User closed or dismissed the popup voluntarily
         setErrorMsg('Sign-in popup closed. Please try again.');
-      } else if (err.code === 'auth/cancelled-popup-request') {
-        // Ignored
       } else {
+        console.error('Google Auth error:', err);
         setErrorMsg(err.message || 'Google sign-in failed. Please try again.');
       }
     } finally {
@@ -221,9 +229,13 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
         const fbUser = credential.user;
 
         // Update display name
-        await updateProfile(fbUser, {
-          displayName: displayName.trim(),
-        });
+        try {
+          await updateProfile(fbUser, {
+            displayName: displayName.trim(),
+          });
+        } catch (profileErr) {
+          console.warn('Could not update display name in auth:', profileErr);
+        }
 
         // Send verification email immediately
         try {
@@ -232,23 +244,36 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
           console.warn('Could not send email verification link:', emailErr);
         }
 
-        // Create Firestore profile
-        const userDocRef = doc(db, 'users', fbUser.uid);
-        const newProfile: UserProfile = {
-          uid: fbUser.uid,
-          email: fbUser.email || email.trim(),
-          displayName: displayName.trim(),
-          role: role,
-          emailVerified: false,
-          phoneNumber: phoneNumber.trim() || undefined,
-          city: city.trim() || undefined,
-          preferredSport: role === 'PLAYER' ? preferredSport : undefined,
-          businessName: role === 'OWNER' ? (businessName.trim() || displayName.trim()) : undefined,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
+        // Create Firestore profile with sanitized data
+        try {
+          const userDocRef = doc(db, 'users', fbUser.uid);
+          const newProfile: Record<string, any> = {
+            uid: fbUser.uid,
+            email: fbUser.email || email.trim(),
+            displayName: displayName.trim(),
+            role: role,
+            emailVerified: false,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
 
-        await setDoc(userDocRef, newProfile);
+          if (phoneNumber.trim()) {
+            newProfile.phoneNumber = phoneNumber.trim();
+          }
+          if (city.trim()) {
+            newProfile.city = city.trim();
+          }
+          if (role === 'PLAYER' && preferredSport) {
+            newProfile.preferredSport = preferredSport;
+          }
+          if (role === 'OWNER') {
+            newProfile.businessName = businessName.trim() || displayName.trim();
+          }
+
+          await setDoc(userDocRef, sanitizeFirestoreData(newProfile), { merge: true });
+        } catch (firestoreErr) {
+          console.warn('Firestore profile save note:', firestoreErr);
+        }
         setInfoMsg('Account created successfully! Verification email has been sent.');
       }
     } catch (err: any) {
