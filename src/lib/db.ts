@@ -577,7 +577,7 @@ export interface Generate7DaySlotsParams {
 export async function generate7DaySlots(params: Generate7DaySlotsParams): Promise<{ totalSlotsCreated: number; datesCovered: string[] }> {
   const dates: string[] = [];
   const baseDate = params.startDate ? new Date(params.startDate) : new Date();
-
+  
   for (let i = 0; i < 7; i++) {
     const d = new Date(baseDate);
     d.setDate(d.getDate() + i);

@@ -194,9 +194,9 @@ export const PlayerPaymentsTab: React.FC<PlayerPaymentsTabProps> = ({ showToast 
             </div>
           ) : (
             <div className="space-y-3">
-              {bookings.map((b) => (
+              {bookings.map((b, idx) => (
                 <div
-                  key={b.id}
+                  key={b.id ? `pay_booking_${b.id}` : `pay_booking_idx_${idx}`}
                   className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 space-y-4 hover:border-slate-700 transition-all shadow-lg"
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
@@ -281,9 +281,9 @@ export const PlayerPaymentsTab: React.FC<PlayerPaymentsTabProps> = ({ showToast 
             </div>
           ) : (
             <div className="divide-y divide-slate-800">
-              {transactions.map((tx) => (
+              {transactions.map((tx, idx) => (
                 <div
-                  key={tx.id}
+                  key={tx.id ? `tx_entry_${tx.id}` : `tx_entry_idx_${tx.transactionId || idx}`}
                   className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs hover:bg-slate-800/40"
                 >
                   <div className="space-y-1">

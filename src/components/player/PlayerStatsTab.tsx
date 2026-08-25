@@ -149,7 +149,7 @@ export const PlayerStatsTab: React.FC<PlayerStatsTabProps> = ({ showToast }) => 
             {stats?.sportsPlayed && stats.sportsPlayed.length > 0 ? (
               stats.sportsPlayed.map((s, idx) => (
                 <span
-                  key={idx}
+                  key={`sport_affinity_${s}_${idx}`}
                   className="bg-slate-950 text-slate-300 text-[11px] font-semibold px-2.5 py-1 rounded-lg border border-slate-800"
                 >
                   {s}
@@ -186,8 +186,8 @@ export const PlayerStatsTab: React.FC<PlayerStatsTabProps> = ({ showToast }) => 
           </div>
         ) : (
           <div className="divide-y divide-slate-800">
-            {bookings.slice(0, 8).map((b) => (
-              <div key={b.id} className="py-3.5 flex items-center justify-between text-xs">
+            {bookings.slice(0, 8).map((b, idx) => (
+              <div key={b.id ? `stats_booking_${b.id}` : `stats_booking_idx_${idx}`} className="py-3.5 flex items-center justify-between text-xs">
                 <div className="space-y-0.5">
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-white">{b.turfName}</span>

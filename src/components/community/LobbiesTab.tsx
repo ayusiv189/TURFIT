@@ -15,6 +15,8 @@ import {
 import { db } from '../../lib/firebase';
 import { Lobby, LobbyPlayer, UserProfile } from '../../types';
 import { useAuth } from '../../context/AuthContext';
+import { openRazorpayCheckout } from '../../lib/razorpay';
+import { cleanupExpiredLobbies, cancelBookingAndDissolveLobby } from '../../lib/db';
 import {
   Activity,
   Calendar,
@@ -39,6 +41,9 @@ import {
   AlertCircle,
   X,
   Play,
+  CreditCard,
+  Building,
+  CheckCircle2,
 } from 'lucide-react';
 import { CreateLobbyModal } from './CreateLobbyModal';
 import { InvitePlayerModal } from './InvitePlayerModal';
@@ -68,6 +73,11 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
   const [lobbyParticipants, setLobbyParticipants] = useState<LobbyPlayer[]>([]);
   const [loadingParticipants, setLoadingParticipants] = useState(false);
 
+  // Join & Payment Modal State
+  const [joinModalLobby, setJoinModalLobby] = useState<Lobby | null>(null);
+  const [joinPaymentOption, setJoinPaymentOption] = useState<'PAY_NOW' | 'PAY_LATER_AT_TURF'>('PAY_NOW');
+  const [joinLoading, setJoinLoading] = useState(false);
+
   // My participation cache
   const [joinedLobbyIds, setJoinedLobbyIds] = useState<Set<string>>(new Set());
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
@@ -78,6 +88,11 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
   const [inviteTargetLobby, setInviteTargetLobby] = useState<Lobby | null>(null);
   const [viewingPlayer, setViewingPlayer] = useState<UserProfile | null>(null);
 
+  // Run auto-cleanup for expired lobbies when component mounts
+  useEffect(() => {
+    cleanupExpiredLobbies().catch((err) => console.warn('Lobby cleanup error:', err));
+  }, []);
+
   // Real-time listener for lobbies
   useEffect(() => {
     setLoading(true);
@@ -86,8 +101,32 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
       q,
       (snapshot) => {
         const list: Lobby[] = [];
-        snapshot.forEach((d) => list.push({ id: d.id, ...d.data() } as Lobby));
-        // Sort by date/startTime
+        const now = new Date();
+        const todayStr = now.toISOString().split('T')[0];
+        const curMinutes = now.getHours() * 60 + now.getMinutes();
+
+        snapshot.forEach((d) => {
+          const lobbyData = { id: d.id, ...d.data() } as Lobby;
+          // Filter out expired lobbies in real-time
+          if (lobbyData.status === 'CANCELLED' || (lobbyData as any).isExpired) return;
+          if (lobbyData.date < todayStr) return;
+          if (lobbyData.date === todayStr && lobbyData.endTime) {
+            let endH = 0;
+            let endM = 0;
+            const parts = lobbyData.endTime.split(' ');
+            const timePart = parts[0];
+            const ampm = parts[1]?.toUpperCase();
+            const [hStr, mStr] = timePart.split(':');
+            endH = parseInt(hStr, 10) || 0;
+            endM = parseInt(mStr, 10) || 0;
+            if (ampm === 'PM' && endH < 12) endH += 12;
+            if (ampm === 'AM' && endH === 12) endH = 0;
+            if (curMinutes > endH * 60 + endM) return;
+          }
+          list.push(lobbyData);
+        });
+
+        // Sort by date/createdAt
         list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         setLobbies(list);
         setLoading(false);
@@ -141,8 +180,8 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
     return () => unsubscribe();
   }, [selectedLobby?.id]);
 
-  // Handle "I'M IN"
-  const handleJoinLobby = async (lobby: Lobby, e?: React.MouseEvent) => {
+  // Trigger "I'M IN" -> Open Payment Choice Modal
+  const handleInitiateJoin = (lobby: Lobby, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     if (!user || !profile) {
       showToast('Please sign in to join a lobby.', 'error');
@@ -164,7 +203,17 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
       return;
     }
 
-    setActionLoadingId(lobby.id);
+    setJoinModalLobby(lobby);
+    setJoinPaymentOption('PAY_NOW');
+  };
+
+  // Confirm Join with Payment Choice
+  const handleConfirmJoinWithPayment = async () => {
+    if (!user || !profile || !joinModalLobby) return;
+    const lobby = joinModalLobby;
+    const price = lobby.pricePerPlayer || 0;
+
+    setJoinLoading(true);
 
     try {
       const participantId = `${lobby.id}_${user.uid}`;
@@ -174,58 +223,149 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
       const lobbyRef = doc(db, 'lobbies', lobby.id);
       const lobbySnap = await getDoc(lobbyRef);
       if (!lobbySnap.exists()) {
-        showToast('Lobby not found.', 'error');
+        showToast('Lobby no longer exists.', 'error');
+        setJoinModalLobby(null);
         return;
       }
       const liveData = lobbySnap.data() as Lobby;
       if (liveData.currentPlayers >= liveData.maxPlayers) {
         showToast('Sorry, this lobby just became full!', 'error');
+        setJoinModalLobby(null);
         return;
       }
 
-      // Add to lobbyPlayers
-      const participant: LobbyPlayer = {
-        id: participantId,
-        lobbyId: lobby.id,
-        uid: user.uid,
-        playerName: profile.displayName || 'Player',
-        playerPhotoURL: profile.photoURL || null,
-        preferredSport: profile.preferredSport || lobby.sport,
-        skillLevel: profile.experienceLevel || 'Intermediate',
-        isHost: false,
-        joinedAt: now,
-      };
-      await setDoc(doc(db, 'lobbyPlayers', participantId), participant);
+      if (joinPaymentOption === 'PAY_NOW' && price > 0) {
+        // Trigger Razorpay Checkout
+        try {
+          const razorpayRes = await openRazorpayCheckout({
+            amount: price,
+            name: 'TruFit Turf Match Share',
+            description: `Match Fee for ${lobby.name} (${lobby.sport})`,
+            prefill: {
+              name: profile.displayName || user.displayName || 'Athlete',
+              email: user.email || '',
+              contact: profile.phoneNumber || '',
+            },
+            notes: {
+              lobbyId: lobby.id,
+              userId: user.uid,
+              sport: lobby.sport,
+            },
+          });
 
-      // Update lobby current count
-      const newCount = liveData.currentPlayers + 1;
-      const isNowFull = newCount >= liveData.maxPlayers;
-      await updateDoc(lobbyRef, {
-        currentPlayers: newCount,
-        status: isNowFull ? 'FULL' : 'OPEN',
-        updatedAt: now,
-      });
+          // Payment Cleared: Store participant as PAID
+          const participant: LobbyPlayer = {
+            id: participantId,
+            lobbyId: lobby.id,
+            uid: user.uid,
+            playerName: profile.displayName || 'Player',
+            playerPhotoURL: profile.photoURL || null,
+            preferredSport: profile.preferredSport || lobby.sport,
+            skillLevel: profile.experienceLevel || 'Intermediate',
+            isHost: false,
+            paymentMethod: 'PAY_NOW',
+            paymentStatus: 'PAID',
+            amountPaid: price,
+            amountDue: 0,
+            paymentTxId: razorpayRes.razorpay_payment_id,
+            joinedAt: now,
+          };
+          await setDoc(doc(db, 'lobbyPlayers', participantId), participant);
 
-      // Send In-App notification to Host if not host
-      if (lobby.hostId !== user.uid) {
-        await addDoc(collection(db, 'notifications'), {
-          userId: lobby.hostId,
-          title: "Player Joined Your Lobby!",
-          message: `${profile.displayName || 'A player'} joined your lobby "${lobby.name}" (${newCount}/${lobby.maxPlayers} players).`,
-          type: 'LOBBY_JOINED',
-          linkType: 'LOBBY',
-          linkId: lobby.id,
-          read: false,
-          createdAt: now,
+          // Record payment transaction record
+          await addDoc(collection(db, 'paymentTransactions'), {
+            userId: user.uid,
+            userName: profile.displayName || 'Athlete',
+            userEmail: user.email || '',
+            amount: price,
+            type: 'LOBBY_JOIN',
+            lobbyId: lobby.id,
+            lobbyName: lobby.name,
+            turfName: lobby.turfName,
+            status: 'SUCCESS',
+            paymentMethod: 'RAZORPAY_ONLINE',
+            razorpayPaymentId: razorpayRes.razorpay_payment_id,
+            createdAt: now,
+          });
+
+          // Update lobby current count
+          const newCount = liveData.currentPlayers + 1;
+          const isNowFull = newCount >= liveData.maxPlayers;
+          await updateDoc(lobbyRef, {
+            currentPlayers: newCount,
+            status: isNowFull ? 'FULL' : 'OPEN',
+            updatedAt: now,
+          });
+
+          // In-App notification to host
+          if (lobby.hostId !== user.uid) {
+            await addDoc(collection(db, 'notifications'), {
+              userId: lobby.hostId,
+              title: "Player Joined & Paid!",
+              message: `${profile.displayName || 'A player'} joined "${lobby.name}" and paid ₹${price} online via Razorpay.`,
+              type: 'LOBBY_JOINED',
+              linkType: 'LOBBY',
+              linkId: lobby.id,
+              read: false,
+              createdAt: now,
+            });
+          }
+
+          showToast(`You're in! Payment of ₹${price} verified via Razorpay. See you on the pitch!`, 'success');
+          setJoinModalLobby(null);
+        } catch (payErr: any) {
+          showToast(payErr.message || 'Payment cancelled or unsuccessful.', 'error');
+        }
+      } else {
+        // Option 2: PAY LATER AT TURF COUNTER
+        const participant: LobbyPlayer = {
+          id: participantId,
+          lobbyId: lobby.id,
+          uid: user.uid,
+          playerName: profile.displayName || 'Player',
+          playerPhotoURL: profile.photoURL || null,
+          preferredSport: profile.preferredSport || lobby.sport,
+          skillLevel: profile.experienceLevel || 'Intermediate',
+          isHost: false,
+          paymentMethod: 'PAY_LATER_AT_TURF',
+          paymentStatus: 'DUE',
+          amountPaid: 0,
+          amountDue: price,
+          joinedAt: now,
+        };
+        await setDoc(doc(db, 'lobbyPlayers', participantId), participant);
+
+        // Update lobby current count
+        const newCount = liveData.currentPlayers + 1;
+        const isNowFull = newCount >= liveData.maxPlayers;
+        await updateDoc(lobbyRef, {
+          currentPlayers: newCount,
+          status: isNowFull ? 'FULL' : 'OPEN',
+          updatedAt: now,
         });
-      }
 
-      showToast("You're in! You have successfully joined the lobby.", 'success');
+        // In-App notification to host
+        if (lobby.hostId !== user.uid) {
+          await addDoc(collection(db, 'notifications'), {
+            userId: lobby.hostId,
+            title: "Player Joined (Pay at Turf)",
+            message: `${profile.displayName || 'A player'} joined "${lobby.name}" (₹${price} to be collected at turf).`,
+            type: 'LOBBY_JOINED',
+            linkType: 'LOBBY',
+            linkId: lobby.id,
+            read: false,
+            createdAt: now,
+          });
+        }
+
+        showToast(`You're in! Please pay ₹${price} at the turf counter on match day.`, 'success');
+        setJoinModalLobby(null);
+      }
     } catch (err: any) {
       console.error('Error joining lobby:', err);
       showToast(err.message || 'Failed to join lobby.', 'error');
     } finally {
-      setActionLoadingId(null);
+      setJoinLoading(false);
     }
   };
 
@@ -235,9 +375,11 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
     if (!user) return;
 
     if (lobby.hostId === user.uid) {
-      showToast('As host, you can cancel or close the lobby instead of leaving.', 'info');
+      showToast('As host, you can dissolve the lobby or cancel the booking.', 'info');
       return;
     }
+
+    if (!confirm(`Are you sure you want to leave "${lobby.name}"?`)) return;
 
     setActionLoadingId(lobby.id);
 
@@ -257,10 +399,40 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
         });
       }
 
-      showToast('You left the lobby.', 'info');
+      showToast('You have stepped out of the lobby.', 'info');
     } catch (err: any) {
       console.error('Error leaving lobby:', err);
       showToast(err.message || 'Failed to leave lobby.', 'error');
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  // Host Action: Cancel Booking & Dissolve Lobby
+  const handleDissolveLobby = async (lobby: Lobby) => {
+    if (!user || user.uid !== lobby.hostId) {
+      showToast('Only the host can dissolve this lobby.', 'error');
+      return;
+    }
+
+    if (
+      !confirm(
+        `Are you sure you want to cancel the booking and dissolve "${lobby.name}"? The turf slot will be released back for other players.`
+      )
+    ) {
+      return;
+    }
+
+    setActionLoadingId(lobby.id);
+    try {
+      await cancelBookingAndDissolveLobby(lobby.bookingId, lobby.id, user.uid);
+      showToast('Booking cancelled and matchmaking lobby dissolved successfully!', 'success');
+      if (selectedLobby?.id === lobby.id) {
+        setSelectedLobby(null);
+      }
+    } catch (err: any) {
+      console.error('Error dissolving lobby:', err);
+      showToast(err.message || 'Failed to dissolve lobby.', 'error');
     } finally {
       setActionLoadingId(null);
     }
@@ -684,7 +856,7 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                       <button
                         type="button"
                         disabled={isActionLoading}
-                        onClick={(e) => handleJoinLobby(lobby, e)}
+                        onClick={(e) => handleInitiateJoin(lobby, e)}
                         className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shadow-md shadow-indigo-950/50 hover:shadow-indigo-500/20 disabled:opacity-50"
                       >
                         {isActionLoading ? (
@@ -907,7 +1079,7 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                     <Shield className="w-4 h-4 text-indigo-400" />
                     <h4 className="text-xs font-bold text-white">Host Controls</h4>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     <button
                       type="button"
                       onClick={() => handleToggleLobbyStatus(selectedLobby)}
@@ -930,10 +1102,11 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                     )}
                     <button
                       type="button"
-                      onClick={() => handleCancelLobby(selectedLobby)}
-                      className="px-3 py-2 bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+                      onClick={() => handleDissolveLobby(selectedLobby)}
+                      className="px-3 py-2 bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1"
                     >
-                      Cancel Lobby
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Dissolve Lobby</span>
                     </button>
                   </div>
                 </div>
@@ -986,7 +1159,7 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                 ) : (
                   <button
                     type="button"
-                    onClick={() => handleJoinLobby(selectedLobby)}
+                    onClick={() => handleInitiateJoin(selectedLobby)}
                     className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer shadow-lg shadow-indigo-950/50"
                   >
                     <Plus className="w-4 h-4" />
@@ -994,6 +1167,155 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================== */}
+      {/* JOIN LOBBY PAYMENT SELECTION MODAL */}
+      {/* ==================================================== */}
+      {joinModalLobby && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 sm:p-7 shadow-2xl space-y-5 animate-scale-up">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="bg-indigo-500/20 text-indigo-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider">
+                  Join Match Lobby
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setJoinModalLobby(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div>
+              <h3 className="text-lg font-bold text-white mb-1">Confirm Your Spot</h3>
+              <p className="text-xs text-slate-400">
+                You are joining <span className="text-white font-semibold">{joinModalLobby.name}</span> at{' '}
+                <span className="text-white font-semibold">{joinModalLobby.turfName}</span>.
+              </p>
+            </div>
+
+            {/* Match summary box */}
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-2 text-xs text-slate-300">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Sport & Venue:</span>
+                <span className="font-semibold text-white">
+                  {joinModalLobby.sport} • {joinModalLobby.turfName}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Date & Time:</span>
+                <span className="font-semibold text-indigo-400">
+                  {joinModalLobby.date} ({joinModalLobby.startTime} - {joinModalLobby.endTime})
+                </span>
+              </div>
+              <div className="flex justify-between border-t border-slate-800/80 pt-2">
+                <span className="text-slate-300 font-bold">Your Share / Per Player:</span>
+                <span className="font-extrabold text-emerald-400 text-sm">
+                  ₹{joinModalLobby.pricePerPlayer}
+                </span>
+              </div>
+            </div>
+
+            {/* Payment Choice Selection */}
+            <div className="space-y-3">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                Select Payment Option
+              </label>
+
+              <div
+                onClick={() => setJoinPaymentOption('PAY_NOW')}
+                className={`p-3.5 rounded-2xl border cursor-pointer transition-all flex items-start gap-3 ${
+                  joinPaymentOption === 'PAY_NOW'
+                    ? 'border-indigo-500 bg-indigo-950/30 ring-1 ring-indigo-500/50'
+                    : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full border flex items-center justify-center mt-0.5 flex-shrink-0 ${
+                    joinPaymentOption === 'PAY_NOW'
+                      ? 'border-indigo-500 bg-indigo-600 text-white'
+                      : 'border-slate-700 bg-slate-900'
+                  }`}
+                >
+                  {joinPaymentOption === 'PAY_NOW' && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <CreditCard className="w-4 h-4 text-indigo-400" />
+                    <span className="text-xs font-bold text-white">Pay Now Online (Razorpay)</span>
+                    <span className="bg-emerald-500/20 text-emerald-400 text-[9px] font-bold px-1.5 py-0.2 rounded">
+                      Fastest
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Pay ₹{joinModalLobby.pricePerPlayer} now via UPI, Cards, Netbanking or Wallets for guaranteed confirmation.
+                  </p>
+                </div>
+              </div>
+
+              <div
+                onClick={() => setJoinPaymentOption('PAY_LATER_AT_TURF')}
+                className={`p-3.5 rounded-2xl border cursor-pointer transition-all flex items-start gap-3 ${
+                  joinPaymentOption === 'PAY_LATER_AT_TURF'
+                    ? 'border-indigo-500 bg-indigo-950/30 ring-1 ring-indigo-500/50'
+                    : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full border flex items-center justify-center mt-0.5 flex-shrink-0 ${
+                    joinPaymentOption === 'PAY_LATER_AT_TURF'
+                      ? 'border-indigo-500 bg-indigo-600 text-white'
+                      : 'border-slate-700 bg-slate-900'
+                  }`}
+                >
+                  {joinPaymentOption === 'PAY_LATER_AT_TURF' && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Building className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold text-white">Pay Later at Turf Counter</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Reserve your spot and settle ₹{joinModalLobby.pricePerPlayer} at the reception before kick-off.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Submit Actions */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setJoinModalLobby(null)}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-xl transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={joinLoading}
+                onClick={handleConfirmJoinWithPayment}
+                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl flex items-center gap-2 transition-all cursor-pointer shadow-lg shadow-indigo-950/50 disabled:opacity-50"
+              >
+                {joinLoading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Processing...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Confirm & Say I'm In</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

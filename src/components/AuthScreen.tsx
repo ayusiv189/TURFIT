@@ -13,6 +13,7 @@ import { auth, db } from '../lib/firebase';
 import { useAuth } from '../context/AuthContext';
 import { UserRole, UserProfile } from '../types';
 import { sanitizeFirestoreData } from '../lib/utils';
+import { ADMIN_EMAILS, isUserAdmin } from '../lib/authUtils';
 import {
   ShieldCheck,
   Mail,
@@ -27,6 +28,7 @@ import {
   AlertCircle,
   Building,
   CheckCircle2,
+  Shield,
 } from 'lucide-react';
 
 interface AuthModalProps {
@@ -38,6 +40,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
 
   const [isLogin, setIsLogin] = useState<boolean>(true);
   const [role, setRole] = useState<UserRole>(initialRole);
+  const [isAdminLoginMode, setIsAdminLoginMode] = useState<boolean>(false);
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
@@ -154,11 +157,14 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
     setGoogleLoading(true);
 
     try {
-      localStorage.setItem('pending_role', role);
+      const targetRole = isAdminLoginMode ? 'ADMIN' : role;
+      localStorage.setItem('pending_role', targetRole);
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
       const result = await signInWithPopup(auth, provider);
       const fbUser = result.user;
+
+      const userIsAdmin = isUserAdmin(fbUser, null);
 
       // Safely ensure user doc exists in Firestore with chosen role
       try {
@@ -166,21 +172,22 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
         const userSnap = await getDoc(userDocRef);
 
         if (!userSnap.exists()) {
+          const finalRole: UserRole = userIsAdmin ? 'ADMIN' : targetRole;
           const profilePayload: Record<string, any> = {
             uid: fbUser.uid,
             email: fbUser.email || '',
-            displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
-            role: role,
+            displayName: fbUser.displayName || fbUser.email?.split('@')[0] || (userIsAdmin ? 'Super Admin' : 'User'),
+            role: finalRole,
             emailVerified: true,
             photoURL: fbUser.photoURL || '',
             city: city.trim() || 'Mumbai',
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           };
-          if (role === 'PLAYER' && preferredSport) {
+          if (finalRole === 'PLAYER' && preferredSport) {
             profilePayload.preferredSport = preferredSport;
           }
-          if (role === 'OWNER') {
+          if (finalRole === 'OWNER') {
             profilePayload.businessName = businessName.trim() || `${fbUser.displayName || 'Owner'}'s Turf`;
           }
           await setDoc(userDocRef, sanitizeFirestoreData(profilePayload), { merge: true });
@@ -190,7 +197,6 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
       }
     } catch (err: any) {
       if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
-        // User closed or dismissed the popup voluntarily
         setErrorMsg('Sign-in popup closed. Please try again.');
       } else {
         console.error('Google Auth error:', err);
@@ -208,6 +214,8 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
     setLoading(true);
 
     try {
+      const targetRole = isAdminLoginMode ? 'ADMIN' : role;
+
       if (isLogin) {
         await signInWithEmailAndPassword(auth, email.trim(), password);
       } else {
@@ -223,7 +231,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
         }
 
         // Save role intent in local storage in case profile doc write lags
-        localStorage.setItem('pending_role', role);
+        localStorage.setItem('pending_role', targetRole);
 
         const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
         const fbUser = credential.user;
@@ -247,11 +255,14 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
         // Create Firestore profile with sanitized data
         try {
           const userDocRef = doc(db, 'users', fbUser.uid);
+          const userIsAdmin = isUserAdmin(fbUser, null);
+          const finalRole: UserRole = userIsAdmin ? 'ADMIN' : targetRole;
+
           const newProfile: Record<string, any> = {
             uid: fbUser.uid,
             email: fbUser.email || email.trim(),
             displayName: displayName.trim(),
-            role: role,
+            role: finalRole,
             emailVerified: false,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -263,10 +274,10 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
           if (city.trim()) {
             newProfile.city = city.trim();
           }
-          if (role === 'PLAYER' && preferredSport) {
+          if (finalRole === 'PLAYER' && preferredSport) {
             newProfile.preferredSport = preferredSport;
           }
-          if (role === 'OWNER') {
+          if (finalRole === 'OWNER') {
             newProfile.businessName = businessName.trim() || displayName.trim();
           }
 
@@ -327,52 +338,72 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
       <div className="w-full max-w-md z-10">
         {/* Brand Header */}
         <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-lg bg-indigo-600 text-white font-black text-2xl italic shadow-lg shadow-indigo-600/30 mb-3">
-            T
+          <div className={`inline-flex items-center justify-center w-12 h-12 rounded-lg ${isAdminLoginMode ? 'bg-amber-600 shadow-amber-600/30' : 'bg-indigo-600 shadow-indigo-600/30'} text-white font-black text-2xl italic shadow-lg mb-3`}>
+            {isAdminLoginMode ? '🛡️' : 'TF'}
           </div>
           <h1 className="text-3xl font-extrabold tracking-tight text-white flex items-center justify-center">
-            TRUFIT <span className="text-indigo-500 font-medium text-sm ml-2 tracking-widest uppercase">Portal</span>
+            TRUFIT{' '}
+            <span className={`${isAdminLoginMode ? 'text-amber-400' : 'text-indigo-500'} font-medium text-sm ml-2 tracking-widest uppercase`}>
+              {isAdminLoginMode ? 'Admin Portal' : 'Portal'}
+            </span>
           </h1>
-          <p className="text-slate-400 text-sm mt-1">Real Sports Turf Discovery & Slot Booking</p>
+          <p className="text-slate-400 text-sm mt-1">
+            {isAdminLoginMode
+              ? 'Authorized Staff & Operations Console Login'
+              : 'Real Sports Turf Discovery & Slot Booking'}
+          </p>
         </div>
 
         {/* Card */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl">
-          {/* Role selector for session setup */}
-          <div className="mb-5">
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-              Select Account Type:
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                id="role-player-select"
-                onClick={() => setRole('PLAYER')}
-                className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition-all cursor-pointer ${
-                  role === 'PLAYER'
-                    ? 'border-indigo-500 bg-indigo-950/50 text-indigo-400 font-bold ring-1 ring-indigo-500/50 shadow-md shadow-indigo-950/30'
-                    : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                }`}
-              >
-                <UserIcon className="w-5 h-5" />
-                <span className="text-xs font-bold">Player / Athlete</span>
-              </button>
-
-              <button
-                type="button"
-                id="role-owner-select"
-                onClick={() => setRole('OWNER')}
-                className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition-all cursor-pointer ${
-                  role === 'OWNER'
-                    ? 'border-indigo-500 bg-indigo-950/50 text-indigo-400 font-bold ring-1 ring-indigo-500/50 shadow-md shadow-indigo-950/30'
-                    : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                }`}
-              >
-                <Building className="w-5 h-5" />
-                <span className="text-xs font-bold">Turf Owner</span>
-              </button>
+        <div className={`bg-slate-900 border ${isAdminLoginMode ? 'border-amber-500/40 shadow-amber-950/30' : 'border-slate-800'} rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl`}>
+          {isAdminLoginMode ? (
+            /* Admin Portal Banner */
+            <div className="bg-amber-950/40 border border-amber-500/30 rounded-xl p-3.5 mb-5 text-center">
+              <div className="flex items-center justify-center gap-2 text-amber-400 font-bold text-xs uppercase tracking-wider mb-1">
+                <ShieldCheck className="w-4 h-4" />
+                <span>Super Admin & Operations Access</span>
+              </div>
+              <p className="text-slate-300 text-xs">
+                Staff account identified as: <span className="font-mono text-amber-300 font-semibold">ayusiv189@gmail.com</span>
+              </p>
             </div>
-          </div>
+          ) : (
+            /* Standard Role selector for session setup */
+            <div className="mb-5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                Select Account Type:
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  id="role-player-select"
+                  onClick={() => setRole('PLAYER')}
+                  className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition-all cursor-pointer ${
+                    role === 'PLAYER'
+                      ? 'border-indigo-500 bg-indigo-950/50 text-indigo-400 font-bold ring-1 ring-indigo-500/50 shadow-md shadow-indigo-950/30'
+                      : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                  }`}
+                >
+                  <UserIcon className="w-5 h-5" />
+                  <span className="text-xs font-bold">Player / Athlete</span>
+                </button>
+
+                <button
+                  type="button"
+                  id="role-owner-select"
+                  onClick={() => setRole('OWNER')}
+                  className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition-all cursor-pointer ${
+                    role === 'OWNER'
+                      ? 'border-indigo-500 bg-indigo-950/50 text-indigo-400 font-bold ring-1 ring-indigo-500/50 shadow-md shadow-indigo-950/30'
+                      : 'border-slate-800 bg-slate-950/50 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                  }`}
+                >
+                  <Building className="w-5 h-5" />
+                  <span className="text-xs font-bold">Turf Owner</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Primary Recommended: Google Sign-In */}
           <div className="mb-6">
@@ -405,7 +436,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                   />
                 </svg>
               )}
-              <span>Continue with Google</span>
+              <span>{isAdminLoginMode ? 'Continue with Admin Google Account' : 'Continue with Google'}</span>
             </button>
             <div className="flex items-center justify-center gap-1.5 mt-2 text-[11px] text-indigo-400">
               <CheckCircle2 className="w-3.5 h-3.5" />
@@ -433,7 +464,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
               }}
               className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
                 isLogin
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-950/50'
+                  ? isAdminLoginMode ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white shadow-md shadow-indigo-950/50'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
@@ -449,7 +480,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
               }}
               className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
                 !isLogin
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-950/50'
+                  ? isAdminLoginMode ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white shadow-md shadow-indigo-950/50'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
@@ -492,7 +523,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                   </div>
                 </div>
 
-                {role === 'OWNER' && (
+                {role === 'OWNER' && !isAdminLoginMode && (
                   <div>
                     <label className="block text-xs font-medium text-slate-300 mb-1">
                       Business / Turf Brand Name
@@ -543,7 +574,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                   </div>
                 </div>
 
-                {role === 'PLAYER' && (
+                {role === 'PLAYER' && !isAdminLoginMode && (
                   <div>
                     <label className="block text-xs font-medium text-slate-300 mb-1">
                       Preferred Sport
@@ -575,7 +606,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
+                  placeholder={isAdminLoginMode ? 'ayusiv189@gmail.com' : 'you@example.com'}
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
                 />
               </div>
@@ -630,18 +661,35 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
               id="auth-submit-btn"
               type="submit"
               disabled={loading}
-              className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg shadow-indigo-950/50 disabled:opacity-50 mt-6 text-sm"
+              className={`w-full ${isAdminLoginMode ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-950/50' : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-950/50'} text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg disabled:opacity-50 mt-6 text-sm`}
             >
               {loading ? (
                 <RefreshCw className="w-5 h-5 animate-spin" />
               ) : (
                 <>
-                  <span>{isLogin ? 'Sign In with Email' : 'Create & Verify Account'}</span>
+                  <span>{isLogin ? (isAdminLoginMode ? 'Sign In as Staff / Admin' : 'Sign In with Email') : 'Create & Verify Account'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
             </button>
           </form>
+
+          {/* Dedicated Staff / Admin Mode Toggle */}
+          <div className="mt-6 pt-4 border-t border-slate-800 text-center">
+            <button
+              id="toggle-admin-login-mode-btn"
+              type="button"
+              onClick={() => {
+                setIsAdminLoginMode(!isAdminLoginMode);
+                setErrorMsg(null);
+                setInfoMsg(null);
+              }}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+              <span>{isAdminLoginMode ? '← Back to Player / Turf Owner Sign-in' : 'Staff / Super Admin Sign In'}</span>
+            </button>
+          </div>
         </div>
 
         {/* Note info */}
@@ -652,4 +700,5 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
     </div>
   );
 };
+
 

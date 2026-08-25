@@ -4,6 +4,7 @@ import { db } from '../../lib/firebase';
 import { Booking, Lobby, LobbyPlayer, Turf, Arena, Slot } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { createLobbyWithSlotTransaction } from '../../lib/db';
+import { openRazorpayCheckout } from '../../lib/razorpay';
 import {
   X,
   Activity,
@@ -261,6 +262,30 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
 
         const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const dayName = days[new Date(selectedDate).getDay()];
+
+        if (paymentMethod === 'PAY_NOW' && selectedSlot.price > 0) {
+          try {
+            await openRazorpayCheckout({
+              amount: selectedSlot.price,
+              name: 'TruFit Turf Booking',
+              description: `Slot Booking & Host Match for ${lobbyName.trim()}`,
+              prefill: {
+                name: profile.displayName || user.displayName || 'Athlete',
+                email: user.email || '',
+                contact: profile.phoneNumber || '',
+              },
+              notes: {
+                slotId: selectedSlot.id,
+                turfId: selectedTurfId,
+                arenaId: selectedArenaId,
+              },
+            });
+          } catch (payErr: any) {
+            setErrorMsg(payErr.message || 'Payment was cancelled or unsuccessful.');
+            setLoading(false);
+            return;
+          }
+        }
 
         const result = await createLobbyWithSlotTransaction({
           hostId: user.uid,

@@ -1,0 +1,63 @@
+{
+  "expo": {
+    "name": "TruFit App",
+    "slug": "trufit",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "trufit",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#090d16"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.trufit.sportsapp",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "TruFit uses your location to discover nearby turfs, arenas, and sports lobbies.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "TruFit uses your location to display distance and provide turn-by-turn navigation to booked turfs.",
+        "NSCameraUsageDescription": "TruFit needs camera access to capture turf pictures and profile avatars.",
+        "NSPhotoLibraryUsageDescription": "TruFit requires photo library access to upload turf photos, arena banners, and user profile pictures."
+      }
+    },
+    "android": {
+      "package": "com.trufit.sportsapp",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#090d16"
+      },
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Show nearby turfs and calculate travel distance to sports grounds."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow TruFit to select photos for turfs and avatar."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {}
+    }
+  }
+}

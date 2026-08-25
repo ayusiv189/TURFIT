@@ -146,10 +146,48 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
   const [editCity, setEditCity] = useState<string>(profile?.city || '');
   const [editSport, setEditSport] = useState<string>(profile?.preferredSport || 'Football');
   const [editPosition, setEditPosition] = useState<string>(profile?.preferredPosition || 'Forward');
+  const [editSports, setEditSports] = useState<string[]>(
+    profile?.preferredSports?.length
+      ? profile.preferredSports
+      : profile?.preferredSport
+      ? [profile.preferredSport]
+      : ['Football']
+  );
+  const [editPositions, setEditPositions] = useState<string[]>(
+    profile?.preferredPositions?.length
+      ? profile.preferredPositions
+      : profile?.preferredPosition
+      ? [profile.preferredPosition]
+      : ['Forward']
+  );
+  const [customPositionInput, setCustomPositionInput] = useState<string>('');
   const [editExperience, setEditExperience] = useState<string>(profile?.experienceLevel || 'INTERMEDIATE');
   const [editBio, setEditBio] = useState<string>(profile?.bio || '');
   const [editInstagram, setEditInstagram] = useState<string>(profile?.instagram || '');
   const [editDiscord, setEditDiscord] = useState<string>(profile?.discord || '');
+
+  // Keep edit state in sync when profile finishes loading
+  useEffect(() => {
+    if (profile) {
+      if (profile.displayName) setEditName(profile.displayName);
+      if (profile.phoneNumber) setEditPhone(profile.phoneNumber);
+      if (profile.city) setEditCity(profile.city);
+      if (profile.experienceLevel) setEditExperience(profile.experienceLevel);
+      if (profile.bio !== undefined) setEditBio(profile.bio);
+      if (profile.instagram) setEditInstagram(profile.instagram);
+      if (profile.discord) setEditDiscord(profile.discord);
+      if (profile.preferredSports && profile.preferredSports.length > 0) {
+        setEditSports(profile.preferredSports);
+      } else if (profile.preferredSport) {
+        setEditSports([profile.preferredSport]);
+      }
+      if (profile.preferredPositions && profile.preferredPositions.length > 0) {
+        setEditPositions(profile.preferredPositions);
+      } else if (profile.preferredPosition) {
+        setEditPositions([profile.preferredPosition]);
+      }
+    }
+  }, [profile]);
 
   const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToastMessage({ text, type: type === 'info' ? 'success' : type });
@@ -686,7 +724,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                 </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {allTurfs.slice(0, 3).map((turf) => {
+                  {allTurfs.slice(0, 3).map((turf, turfIdx) => {
                     const dist = userLocation
                       ? calculateDistanceKm(
                           userLocation.latitude,
@@ -698,7 +736,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
 
                     return (
                       <div
-                        key={turf.id}
+                        key={turf.id || `nearby_turf_${turfIdx}`}
                         onClick={() => {
                           handleSelectTurf(turf);
                           setCurrentTab('explore');
@@ -739,7 +777,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                           <div className="flex flex-wrap gap-1.5 mt-2.5">
                             {turf.sports?.slice(0, 3).map((s, i) => (
                               <span
-                                key={i}
+                                key={`nearby_${turf.id || turfIdx}_sport_${s}_${i}`}
                                 className="bg-slate-950 text-slate-300 text-[10px] font-medium px-2 py-0.5 rounded border border-slate-800"
                               >
                                 {s}
@@ -791,7 +829,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
               <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
                 {['ALL', 'Football', 'Box Cricket', 'Badminton', 'Basketball', 'Pickleball'].map((sport) => (
                   <button
-                    key={sport}
+                    key={`sport_filter_${sport}`}
                     onClick={() => setSelectedSportFilter(sport)}
                     className={`px-3 py-1.5 rounded-xl font-bold transition-all whitespace-nowrap cursor-pointer ${
                       selectedSportFilter === sport
@@ -819,7 +857,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                   </div>
                 ) : (
                   <div className="space-y-3 max-h-[650px] overflow-y-auto pr-1">
-                    {filteredTurfs.map((turf) => {
+                    {filteredTurfs.map((turf, turfIdx) => {
                       const isSelected = selectedTurf?.id === turf.id;
                       const dist = userLocation
                         ? calculateDistanceKm(
@@ -832,7 +870,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
 
                       return (
                         <div
-                          key={turf.id}
+                          key={turf.id ? `explore_turf_${turf.id}` : `explore_turf_idx_${turfIdx}`}
                           onClick={() => handleSelectTurf(turf)}
                           className={`p-4 rounded-2xl border transition-all cursor-pointer ${
                             isSelected
@@ -908,11 +946,11 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                           </div>
                         ) : (
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                            {arenas.map((ar) => {
+                            {arenas.map((ar, arIdx) => {
                               const isArSelected = selectedArena?.id === ar.id;
                               return (
                                 <button
-                                  key={ar.id}
+                                  key={ar.id ? `arena_select_${ar.id}` : `arena_select_idx_${arIdx}`}
                                   onClick={() => handleSelectArena(ar)}
                                   className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
                                     isArSelected
@@ -945,11 +983,11 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                           2. Select Date ({formatDateString(selectedDate)})
                         </span>
                         <div className="flex gap-2 overflow-x-auto pb-2">
-                          {nextDays.map((d) => {
+                          {nextDays.map((d, dIdx) => {
                             const isDateSelected = d.dateStr === selectedDate;
                             return (
                               <button
-                                key={d.dateStr}
+                                key={`date_select_${d.dateStr}_${dIdx}`}
                                 onClick={() => handleSelectDate(d.dateStr)}
                                 className={`min-w-[70px] p-2.5 rounded-xl border text-center transition-all cursor-pointer flex flex-col items-center gap-0.5 ${
                                   isDateSelected
@@ -982,13 +1020,13 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                           </div>
                         ) : (
                           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-                            {slots.map((slot) => {
+                            {slots.map((slot, slotIdx) => {
                               const isAvailable = slot.status === 'AVAILABLE';
                               const isSelected = selectedSlot?.id === slot.id;
 
                               return (
                                 <button
-                                  key={slot.id}
+                                  key={slot.id ? `slot_select_${slot.id}` : `slot_select_${slot.startTime}_${slotIdx}`}
                                   disabled={!isAvailable}
                                   onClick={() => setSelectedSlot(slot)}
                                   className={`p-3 rounded-xl border text-center transition-all ${
@@ -1114,9 +1152,9 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
               </div>
             ) : (
               <div className="space-y-3">
-                {playerBookings.map((b) => (
+                {playerBookings.map((b, bIdx) => (
                   <div
-                    key={b.id}
+                    key={b.id ? `booking_card_${b.id}` : `booking_card_idx_${b.bookingId || bIdx}`}
                     className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4"
                   >
                     <div className="space-y-1">
@@ -1229,20 +1267,44 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
         {currentTab === 'profile' && (
           <div className="max-w-2xl mx-auto space-y-6">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
-              <div className="flex items-center gap-4">
-                <div className="w-16 h-16 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-extrabold text-2xl shadow-lg shadow-indigo-950/50">
-                  {profile?.displayName?.charAt(0) || 'P'}
-                </div>
-                <div>
-                  <h2 className="text-xl font-bold text-white">{profile?.displayName}</h2>
-                  <p className="text-xs text-slate-400">{profile?.email}</p>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="bg-indigo-500/20 text-indigo-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-indigo-500/30 uppercase">
-                      Verified Player
-                    </span>
-                    <span className="bg-slate-800 text-slate-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-slate-700">
-                      {profile?.experienceLevel || 'INTERMEDIATE'}
-                    </span>
+              {/* Profile Card Header Preview */}
+              <div className="space-y-4">
+                <div className="flex items-start gap-4">
+                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-indigo-600 to-indigo-500 text-white flex items-center justify-center font-extrabold text-2xl shadow-lg shadow-indigo-950/50 flex-shrink-0">
+                    {profile?.displayName?.charAt(0) || 'P'}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="text-xl font-bold text-white">{profile?.displayName || 'Sports Athlete'}</h2>
+                      <span className="bg-indigo-500/20 text-indigo-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-indigo-500/30 uppercase">
+                        Verified Player
+                      </span>
+                      <span className="bg-slate-800 text-slate-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-slate-700">
+                        {profile?.experienceLevel || 'INTERMEDIATE'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-0.5">{profile?.email} • {profile?.city || 'Location not set'}</p>
+
+                    {/* Bio Display Preview */}
+                    {profile?.bio && (
+                      <p className="text-xs text-slate-300 bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 mt-2 italic">
+                        "{profile.bio}"
+                      </p>
+                    )}
+
+                    {/* Sports & Positions Badges */}
+                    <div className="flex flex-wrap gap-1.5 mt-2.5">
+                      {(profile?.preferredSports?.length ? profile.preferredSports : [profile?.preferredSport || 'Football']).map((sp, idx) => (
+                        <span key={`prof_sport_${sp}_${idx}`} className="bg-indigo-950/70 text-indigo-300 border border-indigo-500/30 text-[11px] font-semibold px-2 py-0.5 rounded-lg">
+                          ⚽ {sp}
+                        </span>
+                      ))}
+                      {(profile?.preferredPositions?.length ? profile.preferredPositions : [profile?.preferredPosition || 'Forward']).map((pos, idx) => (
+                        <span key={`prof_pos_${pos}_${idx}`} className="bg-slate-800 text-slate-300 border border-slate-700 text-[11px] font-medium px-2 py-0.5 rounded-lg">
+                          🏷️ {pos}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1250,27 +1312,33 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
+                  if (editSports.length === 0) {
+                    showToast('Please select at least one sport you play.', 'error');
+                    return;
+                  }
                   try {
                     await updateUserProfile({
                       displayName: editName,
                       phoneNumber: editPhone,
                       city: editCity,
-                      preferredSport: editSport,
-                      preferredPosition: editPosition,
+                      preferredSport: editSports[0] || editSport,
+                      preferredSports: editSports,
+                      preferredPosition: editPositions[0] || editPosition,
+                      preferredPositions: editPositions,
                       experienceLevel: editExperience as any,
                       bio: editBio,
                       instagram: editInstagram,
                       discord: editDiscord,
                     });
-                    showToast('Player profile & sports badges updated successfully!');
+                    showToast('Player profile, sports, positions & bio saved successfully!');
                   } catch (err) {
                     showToast('Failed to update profile.', 'error');
                   }
                 }}
-                className="space-y-4 pt-4 border-t border-slate-800"
+                className="space-y-5 pt-4 border-t border-slate-800"
               >
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Full Name</label>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">Full Name</label>
                   <input
                     type="text"
                     value={editName}
@@ -1279,18 +1347,19 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Phone</label>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">Phone Number</label>
                     <input
                       type="tel"
                       value={editPhone}
                       onChange={(e) => setEditPhone(e.target.value)}
+                      placeholder="+91 9876543210"
                       className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">City / Region</label>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">City / Region</label>
                     <input
                       type="text"
                       value={editCity}
@@ -1301,39 +1370,189 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Primary Sport</label>
-                    <select
-                      value={editSport}
-                      onChange={(e) => setEditSport(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
-                    >
-                      <option value="Football">Football</option>
-                      <option value="Box Cricket">Box Cricket</option>
-                      <option value="Badminton">Badminton</option>
-                      <option value="Basketball">Basketball</option>
-                      <option value="Pickleball">Pickleball</option>
-                    </select>
+                {/* 1. MULTI-SPORT SELECTION */}
+                <div className="bg-slate-950/60 p-4 rounded-2xl border border-slate-800/80 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+                      <span>⚽ Sports You Play (Select Multiple)</span>
+                    </label>
+                    <span className="text-[11px] text-slate-400 font-medium">
+                      {editSports.length} Selected
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Tap to add or remove sports. Matchmaking and open lobbies will be tailored to these sports.
+                  </p>
+
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {[
+                      { name: 'Football', icon: '⚽' },
+                      { name: 'Box Cricket', icon: '🏏' },
+                      { name: 'Badminton', icon: '🏸' },
+                      { name: 'Basketball', icon: '🏀' },
+                      { name: 'Pickleball', icon: '🏓' },
+                      { name: 'Tennis', icon: '🎾' },
+                      { name: 'Volleyball', icon: '🏐' },
+                      { name: 'Padel', icon: '🎾' },
+                      { name: 'Table Tennis', icon: '🏓' },
+                    ].map((sp, spIdx) => {
+                      const isSelected = editSports.includes(sp.name);
+                      return (
+                        <button
+                          key={`edit_sport_btn_${sp.name}_${spIdx}`}
+                          type="button"
+                          onClick={() => {
+                            if (isSelected) {
+                              if (editSports.length > 1) {
+                                setEditSports(editSports.filter((s) => s !== sp.name));
+                              } else {
+                                showToast('Keep at least one sport selected.', 'error');
+                              }
+                            } else {
+                              setEditSports([...editSports, sp.name]);
+                            }
+                          }}
+                          className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-indigo-600 text-white border-indigo-500 shadow-md shadow-indigo-950/50'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          <span>{sp.icon}</span>
+                          <span>{sp.name}</span>
+                          {isSelected && <CheckCircle2 className="w-3.5 h-3.5 ml-0.5" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. POSITIONS YOU PLAY IN */}
+                <div className="bg-slate-950/60 p-4 rounded-2xl border border-slate-800/80 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+                      <span>🏷️ Positions / Roles You Play In</span>
+                    </label>
+                    <span className="text-[11px] text-slate-400 font-medium">
+                      {editPositions.length} Selected
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Select roles you are comfortable playing in during games and squad matchmaking.
+                  </p>
+
+                  {/* Contextual quick suggestion chips */}
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {[
+                      'Striker / Forward',
+                      'Winger',
+                      'Attacking Midfielder',
+                      'Central Midfielder',
+                      'Defensive Midfielder',
+                      'Center Back',
+                      'Full Back',
+                      'Goalkeeper',
+                      'Top-Order Batsman',
+                      'Middle-Order Finisher',
+                      'Fast Bowler',
+                      'Spin Bowler',
+                      'All-Rounder',
+                      'Wicketkeeper',
+                      'Singles Specialist',
+                      'Doubles - Net / Front',
+                      'Doubles - Smasher',
+                      'Point Guard',
+                      'Shooting Guard',
+                      'Power Forward',
+                      'Center',
+                      'Dinker / Net Player',
+                      'Baseline Smasher',
+                    ].map((pos, posIdx) => {
+                      const isSelected = editPositions.includes(pos);
+                      return (
+                        <button
+                          key={`edit_pos_btn_${pos}_${posIdx}`}
+                          type="button"
+                          onClick={() => {
+                            if (isSelected) {
+                              setEditPositions(editPositions.filter((p) => p !== pos));
+                            } else {
+                              setEditPositions([...editPositions, pos]);
+                            }
+                          }}
+                          className={`text-xs px-2.5 py-1.5 rounded-lg border font-medium transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/50 shadow-sm'
+                              : 'bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          {isSelected ? '✓ ' : '+ '}
+                          {pos}
+                        </button>
+                      );
+                    })}
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Position / Role</label>
+                  {/* Custom Position Adder */}
+                  <div className="flex gap-2 pt-2 border-t border-slate-800/80">
                     <input
                       type="text"
-                      value={editPosition}
-                      onChange={(e) => setEditPosition(e.target.value)}
-                      placeholder="Striker, All-rounder..."
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
+                      value={customPositionInput}
+                      onChange={(e) => setCustomPositionInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          if (customPositionInput.trim() && !editPositions.includes(customPositionInput.trim())) {
+                            setEditPositions([...editPositions, customPositionInput.trim()]);
+                            setCustomPositionInput('');
+                          }
+                        }
+                      }}
+                      placeholder="Add custom position (e.g., Box-to-Box, Sweeper Keeper)..."
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                     />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (customPositionInput.trim() && !editPositions.includes(customPositionInput.trim())) {
+                          setEditPositions([...editPositions, customPositionInput.trim()]);
+                          setCustomPositionInput('');
+                        }
+                      }}
+                      className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold px-3 py-2 rounded-xl transition-all cursor-pointer"
+                    >
+                      + Add
+                    </button>
                   </div>
+                </div>
 
+                {/* 3. USER BIO */}
+                <div className="bg-slate-950/60 p-4 rounded-2xl border border-slate-800/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400">
+                      📝 Athlete Bio & Playstyle
+                    </label>
+                    <span className="text-[11px] text-slate-500">
+                      {editBio.length}/300 chars
+                    </span>
+                  </div>
+                  <textarea
+                    rows={3}
+                    maxLength={300}
+                    value={editBio}
+                    onChange={(e) => setEditBio(e.target.value)}
+                    placeholder="Tell other players and turf hosts about yourself (e.g. 'Weekend footballer & box cricketer. Love fast-paced 5v5 matches and always available on Saturday mornings!')..."
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Skill Tier</label>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">Skill Tier</label>
                     <select
                       value={editExperience}
                       onChange={(e) => setEditExperience(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
                     >
                       <option value="BEGINNER">Beginner</option>
                       <option value="INTERMEDIATE">Intermediate</option>
@@ -1341,47 +1560,33 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                       <option value="PRO">Pro / Semi-Pro</option>
                     </select>
                   </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Player Bio</label>
-                  <textarea
-                    rows={3}
-                    value={editBio}
-                    onChange={(e) => setEditBio(e.target.value)}
-                    placeholder="Striker / Midfielder looking for regular weekend games and competitive squad leagues..."
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Instagram Handle</label>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">Instagram</label>
                     <input
                       type="text"
                       value={editInstagram}
                       onChange={(e) => setEditInstagram(e.target.value)}
                       placeholder="@username"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Discord Tag</label>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">Discord Tag</label>
                     <input
                       type="text"
                       value={editDiscord}
                       onChange={(e) => setEditDiscord(e.target.value)}
                       placeholder="username#0000"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
                     />
                   </div>
                 </div>
 
                 <button
                   type="submit"
-                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg transition-all shadow-lg shadow-indigo-950/50 cursor-pointer"
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-indigo-950/50 cursor-pointer text-xs uppercase tracking-wider"
                 >
-                  Save Profile & Badges
+                  Save Profile, Sports, Positions & Bio
                 </button>
               </form>
 

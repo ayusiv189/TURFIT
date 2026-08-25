@@ -10,6 +10,7 @@
         "displayName": { "type": "string" },
         "role": { "type": "string", "enum": ["PLAYER", "OWNER"] },
         "phoneNumber": { "type": "string" },
+        "paymentSettings": { "type": "object" },
         "createdAt": { "type": "string" }
       },
       "required": ["id", "email", "role"]
@@ -24,6 +25,8 @@
         "name": { "type": "string" },
         "address": { "type": "string" },
         "city": { "type": "string" },
+        "upiId": { "type": "string" },
+        "paymentSettings": { "type": "object" },
         "active": { "type": "boolean" },
         "createdAt": { "type": "string" }
       },

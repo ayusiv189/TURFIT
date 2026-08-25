@@ -5,6 +5,7 @@ import { AuthScreen } from './components/AuthScreen';
 import { OwnerDashboard } from './components/OwnerDashboard';
 import { PlayerHome } from './components/PlayerHome';
 import { AdminVerificationDashboard } from './components/admin/AdminVerificationDashboard';
+import { AdminRoleSwitcherBar } from './components/admin/AdminRoleSwitcherBar';
 import {
   Home,
   Compass,
@@ -29,10 +30,9 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  const { user, profile, loading, role, emailVerified, logout } = useAuth();
+  const { user, profile, loading, role, isAdmin, activeRole, setActiveRole, emailVerified, logout } = useAuth();
 
   // Tab states for Owner and Player
-  const [isAdminView, setIsAdminView] = useState(false);
   const [playerTab, setPlayerTab] = useState<
     | 'home'
     | 'explore'
@@ -84,28 +84,16 @@ export default function App() {
   return (
     <LocationProvider>
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between">
-        {/* Floating Quick Switch for Ops / Verification Review */}
-        <div className="fixed top-3 right-4 z-50 flex items-center gap-2">
-          <button
-            onClick={() => setIsAdminView(!isAdminView)}
-            className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-lg flex items-center gap-1.5 cursor-pointer backdrop-blur-md border ${
-              isAdminView
-                ? 'bg-amber-600 hover:bg-amber-500 text-white border-amber-400/50 shadow-amber-950/50'
-                : 'bg-slate-900/90 hover:bg-slate-800 text-indigo-300 border-indigo-500/30'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>{isAdminView ? '← Exit Admin Ops' : 'Admin Verification Portal'}</span>
-          </button>
-        </div>
+        {/* Admin Bar (Only visible to authenticated Super Admins) */}
+        {isAdmin && <AdminRoleSwitcherBar />}
 
-        {/* Main Content Router based on user role and admin view */}
+        {/* Main Content Router based on activeRole (ADMIN / OWNER / PLAYER) */}
         <div className="flex-1 pb-16">
-          {isAdminView ? (
-            <div className="pt-8">
+          {activeRole === 'ADMIN' && isAdmin ? (
+            <div className="pt-2">
               <AdminVerificationDashboard />
             </div>
-          ) : role === 'OWNER' ? (
+          ) : activeRole === 'OWNER' ? (
             <OwnerDashboard currentTab={ownerTab} setCurrentTab={setOwnerTab} />
           ) : (
             <PlayerHome currentTab={playerTab} setCurrentTab={setPlayerTab} />
@@ -118,12 +106,28 @@ export default function App() {
           className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 shadow-2xl py-1.5 px-2"
         >
           <div className="max-w-4xl mx-auto flex items-center justify-start md:justify-around gap-1 overflow-x-auto no-scrollbar">
-            {isAdminView ? (
-              <div className="py-2 text-center text-xs font-semibold text-amber-400 flex items-center justify-center gap-2 w-full">
-                <ShieldCheck className="w-4 h-4" />
-                <span>Admin Operations Verification Console Active</span>
+            {activeRole === 'ADMIN' && isAdmin ? (
+              <div className="py-2 text-center text-xs font-semibold text-amber-400 flex items-center justify-between gap-2 w-full px-4">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-amber-400" />
+                  <span>Admin Operations Verification Console</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setActiveRole('OWNER')}
+                    className="text-[11px] bg-slate-800 hover:bg-slate-700 text-indigo-300 px-2.5 py-1 rounded-md border border-slate-700 font-bold cursor-pointer"
+                  >
+                    Switch to Owner View →
+                  </button>
+                  <button
+                    onClick={() => setActiveRole('PLAYER')}
+                    className="text-[11px] bg-slate-800 hover:bg-slate-700 text-emerald-300 px-2.5 py-1 rounded-md border border-slate-700 font-bold cursor-pointer"
+                  >
+                    Switch to Player View →
+                  </button>
+                </div>
               </div>
-            ) : role === 'OWNER' ? (
+            ) : activeRole === 'OWNER' ? (
               // Owner Navigation Tabs
               <>
                 <button
