@@ -1,4 +1,100 @@
-export type UserRole = 'PLAYER' | 'OWNER';
+export type UserRole = 'PLAYER' | 'OWNER' | 'ADMIN';
+
+export type TurfVerificationStatus =
+  | 'draft'
+  | 'pending_verification'
+  | 'under_review'
+  | 'verified'
+  | 'rejected'
+  | 'suspended';
+
+export type TurfVerificationLevel = 1 | 2 | 3; // 1: Contact Verified, 2: Turf Verified, 3: Physically Verified
+
+export type DocumentType =
+  | 'BUSINESS_REGISTRATION'
+  | 'GST_CERTIFICATE'
+  | 'TRADE_LICENSE'
+  | 'LEASE_AGREEMENT'
+  | 'OWNERSHIP_DEED'
+  | 'ELECTRICITY_BILL'
+  | 'OTHER_PROOF';
+
+export type DocumentStatus = 'uploaded' | 'under_review' | 'verified' | 'rejected';
+
+export type PhysicalVerificationStatus =
+  | 'pending'
+  | 'requested'
+  | 'submitted'
+  | 'verified'
+  | 'rejected';
+
+export interface VerificationDocument {
+  id: string;
+  turfId: string;
+  ownerId: string;
+  documentType: DocumentType;
+  documentName: string;
+  fileUrl: string;
+  status: DocumentStatus;
+  uploadedAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  rejectionReason?: string;
+}
+
+export interface VerificationHistory {
+  id: string;
+  turfId: string;
+  action:
+    | 'submitted'
+    | 'under_review'
+    | 'approved'
+    | 'rejected'
+    | 'suspended'
+    | 'resubmitted'
+    | 'physical_requested'
+    | 'physical_approved'
+    | 'more_info_requested';
+  previousStatus: TurfVerificationStatus;
+  newStatus: TurfVerificationStatus;
+  performedBy: string;
+  performedByName?: string;
+  reason?: string;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface TurfPhotoVerification {
+  entrancePhoto?: string;
+  signboardPhoto?: string;
+  playingAreaPhotos?: string[];
+  facilitiesPhotos?: string[];
+  additionalPhotos?: string[];
+  verified?: boolean;
+}
+
+export interface TurfVerificationDetails {
+  submittedAt?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  reviewedByName?: string;
+  rejectionReason?: string;
+  adminNotes?: string;
+  moreInfoRequestedNotes?: string;
+  physicalVerificationStatus?: PhysicalVerificationStatus;
+  physicalVerificationCode?: string;
+  physicalVerificationVideoUrl?: string;
+  physicalVerificationSubmittedAt?: string;
+  physicalVerificationReviewedAt?: string;
+  photoVerification?: TurfPhotoVerification;
+  duplicateWarning?: {
+    flagged: boolean;
+    existingTurfId?: string;
+    existingTurfName?: string;
+    distanceMeters?: number;
+    adminReviewed?: boolean;
+  };
+}
 
 export type SlotStatus =
   | 'AVAILABLE'
@@ -38,13 +134,31 @@ export interface UserProfile {
   preferredSports?: string[];
   experienceLevel?: ExperienceLevel;
   preferredPosition?: string;
+  preferredPositions?: string[];
   bio?: string;
   businessName?: string;
   matchesPlayed?: number;
   teamsCount?: number;
   isPublic?: boolean;
+  paymentSettings?: OwnerPaymentSettings;
   createdAt: string; // ISO String
   updatedAt: string; // ISO String
+}
+
+export interface OwnerPaymentSettings {
+  upiId?: string; // e.g. "turfvenue@okaxis" or "9876543210@paytm"
+  beneficiaryName?: string; // e.g. "Apex Sports Arena LLP"
+  razorpayKeyId?: string; // e.g. "rzp_live_..." or "rzp_test_..."
+  razorpayAccountId?: string; // e.g. "acc_..."
+  bankName?: string; // e.g. "HDFC Bank"
+  accountNumber?: string; // e.g. "501000..."
+  ifscCode?: string; // e.g. "HDFC0001234"
+  qrCodeUrl?: string; // Custom uploaded QR image or data URL
+  allowDirectUpi?: boolean;
+  allowOnlineRazorpay?: boolean;
+  allowPayAtVenue?: boolean;
+  paymentInstructions?: string; // e.g. "Please enter booking ID in UPI note"
+  updatedAt?: string;
 }
 
 export interface Turf {
@@ -65,6 +179,17 @@ export interface Turf {
   longitude: number;
   photos: string[]; // URLs or base64 storage refs
   active: boolean;
+  isClosed?: boolean;
+  closureReason?: string;
+  closureNotice?: string;
+  upiId?: string;
+  beneficiaryName?: string;
+  paymentSettings?: OwnerPaymentSettings;
+  verificationStatus?: TurfVerificationStatus;
+  verificationLevel?: TurfVerificationLevel;
+  phoneVerified?: boolean;
+  emailVerified?: boolean;
+  verification?: TurfVerificationDetails;
   createdAt: string;
   updatedAt: string;
 }
@@ -80,6 +205,8 @@ export interface Arena {
   pricePerSlot: number; // ₹
   photos: string[];
   active: boolean;
+  isUnderMaintenance?: boolean;
+  maintenanceReason?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -89,15 +216,19 @@ export interface Slot {
   turfId: string;
   arenaId: string;
   ownerId: string;
+  sport?: string;
   date: string; // YYYY-MM-DD
   day: string; // "Monday", "Tuesday", etc.
   startTime: string; // e.g. "18:00" or "06:00 PM"
   endTime: string; // e.g. "19:00" or "07:00 PM"
   durationMinutes: number; // e.g. 60
   price: number; // ₹
+  maxPlayers?: number;
   visibleToPlayers: boolean;
   status: SlotStatus;
   bookingType?: BookingType;
+  creationType?: 'AUTO' | 'MANUAL';
+  recurringScheduleId?: string;
   bookedByPlayerId?: string;
   bookedByPlayerName?: string;
   activeBookingId?: string;
@@ -134,7 +265,10 @@ export interface Booking {
   paymentStatus: PaymentStatus;
   bookingStatus: BookingStatus;
   bookingType: BookingType;
-  paymentMethod?: 'PAY_NOW' | 'PAY_LATER_AT_TURF';
+  paymentMethod?: 'PAY_NOW' | 'PAY_LATER_AT_TURF' | 'DIRECT_UPI' | 'ONLINE_RAZORPAY';
+  paymentTxId?: string;
+  upiTxnId?: string;
+  ownerPaymentId?: string;
   lobbyCreated?: boolean;
   lobbyId?: string;
   createdAt: string;
@@ -201,6 +335,9 @@ export interface Lobby {
   isPublic: boolean;
   allowNewPlayers: boolean;
   status: LobbyStatus;
+  players?: any[];
+  playerUids?: string[];
+  isExpired?: boolean;
   matchId?: string;
   createdAt: string;
   updatedAt: string;
@@ -215,6 +352,13 @@ export interface LobbyPlayer {
   preferredSport?: string;
   skillLevel?: string;
   isHost: boolean;
+  paymentMethod?: 'PAY_NOW' | 'PAY_LATER_AT_TURF';
+  paymentStatus?: 'PAID' | 'DUE' | 'PARTIAL';
+  amountDue?: number;
+  amountPaid?: number;
+  remainingAmount?: number;
+  paymentTxId?: string;
+  razorpay_payment_id?: string;
   joinedAt: string;
 }
 

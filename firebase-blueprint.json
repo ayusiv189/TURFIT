@@ -1,0 +1,135 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with role-based access",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["PLAYER", "OWNER"] },
+        "phoneNumber": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "email", "role"]
+    },
+    "Turf": {
+      "title": "Turf",
+      "description": "Turf venue document owned by an owner",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "ownerId", "name"]
+    },
+    "Arena": {
+      "title": "Arena",
+      "description": "Court/Pitch within a turf venue",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "turfId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "sport": { "type": "string" },
+        "capacity": { "type": "number" },
+        "pricePerSlot": { "type": "number" }
+      },
+      "required": ["id", "turfId", "ownerId", "name"]
+    },
+    "Slot": {
+      "title": "Slot",
+      "description": "Individual bookable time slot",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "turfId": { "type": "string" },
+        "arenaId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "date": { "type": "string" },
+        "day": { "type": "string" },
+        "startTime": { "type": "string" },
+        "endTime": { "type": "string" },
+        "price": { "type": "number" },
+        "status": { "type": "string", "enum": ["AVAILABLE", "HELD", "BOOKED", "BOOKED_BY_PLAYER", "BOOKED_BY_OWNER", "BLOCKED", "COMPLETED", "CANCELLED"] },
+        "visibleToPlayers": { "boolean": true },
+        "creationType": { "type": "string", "enum": ["AUTO", "MANUAL"] }
+      },
+      "required": ["id", "turfId", "arenaId", "ownerId", "date", "startTime", "endTime", "status"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Confirmed booking for a single slot",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "playerId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "turfId": { "type": "string" },
+        "arenaId": { "type": "string" },
+        "slotId": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "amountPaid": { "type": "number" },
+        "amountDue": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["PENDING", "PARTIALLY_PAID", "PAID"] },
+        "bookingStatus": { "type": "string", "enum": ["CONFIRMED", "CANCELLED", "COMPLETED"] }
+      },
+      "required": ["id", "playerId", "ownerId", "slotId", "totalAmount"]
+    },
+    "BookingPlayerShare": {
+      "title": "BookingPlayerShare",
+      "description": "Individual player split share for a booking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "bookingId": { "type": "string" },
+        "playerId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "shareAmount": { "type": "number" },
+        "amountPaid": { "type": "number" },
+        "amountDue": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "bookingId", "playerId", "shareAmount"]
+    },
+    "PaymentTransaction": {
+      "title": "PaymentTransaction",
+      "description": "Payment transaction record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "bookingId": { "type": "string" },
+        "playerId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "bookingId", "playerId", "amount", "status"]
+    },
+    "Lobby": {
+      "title": "Lobby",
+      "description": "Community sports matchmaking lobby",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "sport": { "type": "string" },
+        "turfId": { "type": "string" },
+        "hostId": { "type": "string" },
+        "bookingId": { "type": "string" },
+        "slotId": { "type": "string" },
+        "maxPlayers": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "name", "sport", "hostId"]
+    }
+  }
+}

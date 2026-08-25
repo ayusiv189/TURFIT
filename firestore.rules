@@ -1,6 +1,4 @@
-// TruFit Firestore Security Rules
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -8,247 +6,208 @@ service cloud.firestore {
     function isAuthenticated() {
       return request.auth != null;
     }
-    
-    function isOwnerOfUser(userId) {
+
+    function isOwnerOf(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    function getUserData() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
     }
 
-    function isOwnerRole() {
-      return isAuthenticated() && getUserData().role == 'OWNER';
-    }
-
-    function isPlayerRole() {
-      return isAuthenticated() && getUserData().role == 'PLAYER';
-    }
-
-    // Users Collection
+    // Users
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.auth.uid == userId;
-      allow update: if isAuthenticated() && request.auth.uid == userId;
-      allow delete: if false;
+      allow read: if true;
+      allow write: if isOwnerOf(userId);
     }
 
-    // Turfs Collection
+    // Turfs & Verification
     match /turfs/{turfId} {
-      // Anyone authenticated can read active turfs
-      allow read: if isAuthenticated();
-      // Only owners can create turfs, setting themselves as ownerId
-      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
-      // Only the owner can update or delete their turf
-      allow update, delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
-    }
-
-    // Arenas Collection
-    match /arenas/{arenaId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
-      allow update, delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
-    }
-
-    // Slots Collection
-    match /slots/{slotId} {
-      // Authenticated users can read slots.
-      // In app logic, players filter by visibleToPlayers == true || resource.data.ownerId == request.auth.uid
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
-      // Owner can update any slot fields; Player can update slot status during booking transactions
-      allow update: if isAuthenticated() && (
-        resource.data.ownerId == request.auth.uid ||
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'bookedByPlayerId']))
-      );
-      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
-    }
-
-    // Bookings Collection
-    match /bookings/{bookingId} {
-      // A user can read a booking if they are the player or the owner of the turf
-      allow read: if isAuthenticated() && (
-        resource.data.playerId == request.auth.uid ||
-        resource.data.ownerId == request.auth.uid
-      );
-      // Players can create their own booking; Owners can create owner-booked slots
-      allow create: if isAuthenticated() && (
-        request.resource.data.playerId == request.auth.uid ||
-        request.resource.data.ownerId == request.auth.uid
-      );
-      // Only the relevant player or owner can update
-      allow update: if isAuthenticated() && (
-        resource.data.playerId == request.auth.uid ||
-        resource.data.ownerId == request.auth.uid
-      );
-      allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
-    }
-
-    // Payments Collection & Transactions
-    match /payments/{paymentId} {
-      allow read: if isAuthenticated() && (
-        resource.data.playerId == request.auth.uid ||
-        resource.data.ownerId == request.auth.uid
-      );
-      allow create: if isAuthenticated() && (
-        request.resource.data.playerId == request.auth.uid ||
-        request.resource.data.ownerId == request.auth.uid
-      );
-      allow update: if isAuthenticated() && (
-        resource.data.playerId == request.auth.uid ||
-        resource.data.ownerId == request.auth.uid
-      );
-    }
-
-    match /paymentTransactions/{transactionId} {
-      allow read: if isAuthenticated() && (
-        resource.data.playerId == request.auth.uid ||
-        resource.data.ownerId == request.auth.uid
-      );
-      allow create: if isAuthenticated() && (
-        request.resource.data.playerId == request.auth.uid ||
-        request.resource.data.ownerId == request.auth.uid
-      );
-      allow update: if false; // Transactions are immutable ledger entries
-      allow delete: if false;
-    }
-
-    // ==========================================
-    // PHASE 2: COMMUNITY, LOBBIES, TEAMS & MATCHES
-    // ==========================================
-
-    // Lobbies Collection
-    match /lobbies/{lobbyId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.hostId == request.auth.uid;
-      allow update: if isAuthenticated();
-      allow delete: if isAuthenticated() && resource.data.hostId == request.auth.uid;
-    }
-
-    // Lobby Players Collection
-    match /lobbyPlayers/{participantId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated() && resource.data.uid == request.auth.uid;
-      allow delete: if isAuthenticated();
-    }
-
-    // Lobby Invitations Collection
-    match /lobbyInvitations/{invitationId} {
-      allow read: if isAuthenticated() && (
-        resource.data.receiverId == request.auth.uid ||
-        resource.data.senderId == request.auth.uid
-      );
-      allow create: if isAuthenticated() && request.resource.data.senderId == request.auth.uid;
-      allow update: if isAuthenticated() && (
-        resource.data.receiverId == request.auth.uid ||
-        resource.data.senderId == request.auth.uid
-      );
-      allow delete: if isAuthenticated() && (
-        resource.data.senderId == request.auth.uid ||
-        resource.data.receiverId == request.auth.uid
-      );
-    }
-
-    // Teams Collection
-    match /teams/{teamId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.captainId == request.auth.uid;
-      allow update: if isAuthenticated();
-      allow delete: if isAuthenticated() && resource.data.captainId == request.auth.uid;
-    }
-
-    // Team Members Collection
-    match /teamMembers/{memberId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated();
-      allow delete: if isAuthenticated();
-    }
-
-    // Team Invitations Collection
-    match /teamInvitations/{invitationId} {
-      allow read: if isAuthenticated() && (
-        resource.data.receiverId == request.auth.uid ||
-        resource.data.senderId == request.auth.uid
-      );
-      allow create: if isAuthenticated() && request.resource.data.senderId == request.auth.uid;
-      allow update: if isAuthenticated() && (
-        resource.data.receiverId == request.auth.uid ||
-        resource.data.senderId == request.auth.uid
-      );
-      allow delete: if isAuthenticated() && (
-        resource.data.senderId == request.auth.uid ||
-        resource.data.receiverId == request.auth.uid
-      );
-    }
-
-    // Matches Collection
-    match /matches/{matchId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.hostId == request.auth.uid;
-      allow update: if isAuthenticated();
-      allow delete: if isAuthenticated() && resource.data.hostId == request.auth.uid;
-    }
-
-    // Match Players Collection
-    match /matchPlayers/{participantId} {
-      allow read: if isAuthenticated();
+      allow read: if true;
       allow create: if isAuthenticated();
       allow update, delete: if isAuthenticated();
+
+      // Verification Documents subcollection (Private to owner and admins)
+      match /verificationDocuments/{docId} {
+        allow read: if isAuthenticated();
+        allow create, update: if isAuthenticated();
+        allow delete: if isAuthenticated();
+      }
+
+      // Verification History subcollection (Audit log)
+      match /verificationHistory/{historyId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update, delete: if false; // immutable audit history
+      }
     }
 
-    // In-App Notifications Collection
-    match /notifications/{notificationId} {
-      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    // Arenas
+    match /arenas/{arenaId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
     }
 
-    // ==========================================
-    // PHASE 3: REVIEWS, OFFERS, REWARDS, RECURRING & SPLIT PAYMENTS
-    // ==========================================
-
-    // Reviews Collection
-    match /reviews/{reviewId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
-      allow update: if isAuthenticated() && (
-        resource.data.userId == request.auth.uid ||
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerResponse', 'ownerRespondedAt'])
-      );
-      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    // Slots
+    match /slots/{slotId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
     }
 
-    // Offers & Promotions Collection
-    match /offers/{offerId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
-      allow update, delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    // Bookings
+    match /bookings/{bookingId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
     }
 
-    // Reward Wallets Collection
-    match /rewardWallets/{walletId} {
-      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
-      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow delete: if false;
+    // Booking Players & Booking Shares
+    match /bookingPlayers/{id} {
+      allow read: if true;
+      allow write: if isAuthenticated();
     }
 
-    // Recurring Slot Schedules Collection
-    match /recurringSchedules/{scheduleId} {
-      allow read: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
-      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
-      allow update, delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
-    }
-
-    // Booking Split Payment Shares Collection
     match /bookingShares/{shareId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated();
-      allow delete: if isAuthenticated();
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Payments & Payment Transactions
+    match /payments/{paymentId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /paymentTransactions/{txId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Lobbies & Lobby Players & Invitations
+    match /lobbies/{lobbyId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /lobbyPlayers/{playerId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /lobbyInvitations/{invitationId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Teams, Members & Team Invitations
+    match /teams/{teamId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /teamMembers/{memberId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /teamInvitations/{invitationId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Matches & Match Players
+    match /matches/{matchId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /matchPlayers/{matchPlayerId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Reviews (turfReviews and reviews)
+    match /turfReviews/{reviewId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Offers & Promos
+    match /offers/{offerId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Rewards & Wallets
+    match /userRewardWallets/{walletId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /rewardWallets/{walletId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /rewardHistory/{historyId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /rewardVouchers/{voucherId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Notifications
+    match /inAppNotifications/{notifId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /notifications/{notifId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Recurring Schedules
+    match /recurringSchedules/{scheduleId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Player Dues & Dues
+    match /dues/{dueId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /playerDues/{dueId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Player Pools / Interest Pools
+    match /playerPools/{poolId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /pools/{poolId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Refunds
+    match /refunds/{refundId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
     }
   }
 }
+

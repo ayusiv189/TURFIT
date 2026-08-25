@@ -4,6 +4,7 @@ import { LocationProvider } from './context/LocationContext';
 import { AuthScreen } from './components/AuthScreen';
 import { OwnerDashboard } from './components/OwnerDashboard';
 import { PlayerHome } from './components/PlayerHome';
+import { AdminVerificationDashboard } from './components/admin/AdminVerificationDashboard';
 import {
   Home,
   Compass,
@@ -17,18 +18,21 @@ import {
   Sparkles,
   Users,
   Shield,
+  ShieldCheck,
   Trophy,
   BarChart3,
   Tag,
   Star,
   Gift,
   BarChart2,
+  QrCode,
 } from 'lucide-react';
 
 export default function App() {
   const { user, profile, loading, role, emailVerified, logout } = useAuth();
 
   // Tab states for Owner and Player
+  const [isAdminView, setIsAdminView] = useState(false);
   const [playerTab, setPlayerTab] = useState<
     | 'home'
     | 'explore'
@@ -52,6 +56,7 @@ export default function App() {
     | 'offers'
     | 'reviews'
     | 'payments'
+    | 'payouts'
     | 'profile'
   >('dashboard');
 
@@ -79,9 +84,28 @@ export default function App() {
   return (
     <LocationProvider>
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between">
-        {/* Main Content Router based on user role */}
-        <div className="flex-1">
-          {role === 'OWNER' ? (
+        {/* Floating Quick Switch for Ops / Verification Review */}
+        <div className="fixed top-3 right-4 z-50 flex items-center gap-2">
+          <button
+            onClick={() => setIsAdminView(!isAdminView)}
+            className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-lg flex items-center gap-1.5 cursor-pointer backdrop-blur-md border ${
+              isAdminView
+                ? 'bg-amber-600 hover:bg-amber-500 text-white border-amber-400/50 shadow-amber-950/50'
+                : 'bg-slate-900/90 hover:bg-slate-800 text-indigo-300 border-indigo-500/30'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>{isAdminView ? '← Exit Admin Ops' : 'Admin Verification Portal'}</span>
+          </button>
+        </div>
+
+        {/* Main Content Router based on user role and admin view */}
+        <div className="flex-1 pb-16">
+          {isAdminView ? (
+            <div className="pt-8">
+              <AdminVerificationDashboard />
+            </div>
+          ) : role === 'OWNER' ? (
             <OwnerDashboard currentTab={ownerTab} setCurrentTab={setOwnerTab} />
           ) : (
             <PlayerHome currentTab={playerTab} setCurrentTab={setPlayerTab} />
@@ -94,7 +118,12 @@ export default function App() {
           className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 shadow-2xl py-1.5 px-2"
         >
           <div className="max-w-4xl mx-auto flex items-center justify-start md:justify-around gap-1 overflow-x-auto no-scrollbar">
-            {role === 'OWNER' ? (
+            {isAdminView ? (
+              <div className="py-2 text-center text-xs font-semibold text-amber-400 flex items-center justify-center gap-2 w-full">
+                <ShieldCheck className="w-4 h-4" />
+                <span>Admin Operations Verification Console Active</span>
+              </div>
+            ) : role === 'OWNER' ? (
               // Owner Navigation Tabs
               <>
                 <button
@@ -173,6 +202,19 @@ export default function App() {
                 >
                   <CreditCard className="w-4 h-4" />
                   <span>Dues</span>
+                </button>
+
+                <button
+                  id="nav-owner-payment-id"
+                  onClick={() => setOwnerTab('payments')}
+                  className={`flex flex-col items-center gap-0.5 text-[8px] sm:text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer py-1.5 px-2 rounded-xl shrink-0 ${
+                    ownerTab === 'payments' || ownerTab === 'payouts'
+                      ? 'text-indigo-400 bg-indigo-500/10'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                  }`}
+                >
+                  <QrCode className="w-4 h-4" />
+                  <span>Payment ID</span>
                 </button>
 
                 <button

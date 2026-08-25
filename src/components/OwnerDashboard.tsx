@@ -17,6 +17,9 @@ import {
   deleteSlot,
   updateBookingPaymentStatus,
   bookSlotWithTransaction,
+  generate7DaySlots,
+  toggleArenaMaintenance,
+  toggleTurfClosedStatus,
 } from '../lib/db';
 import {
   formatCurrency,
@@ -33,6 +36,9 @@ import { OwnerPlayerDues } from './owner/OwnerPlayerDues';
 import { OwnerOffersTab } from './owner/OwnerOffersTab';
 import { OwnerReviewsTab } from './owner/OwnerReviewsTab';
 import { RecurringSlotsModal } from './owner/RecurringSlotsModal';
+import { SevenDaySlotsModal } from './owner/SevenDaySlotsModal';
+import { OwnerPaymentSettingsTab } from './owner/OwnerPaymentSettingsTab';
+import { OwnerVerificationCard } from './owner/OwnerVerificationCard';
 import {
   Building2,
   Calendar,
@@ -60,6 +66,11 @@ import {
   Tag,
   Star,
   Repeat,
+  Zap,
+  Wrench,
+  Power,
+  Ban,
+  QrCode,
 } from 'lucide-react';
 
 interface OwnerDashboardProps {
@@ -73,6 +84,7 @@ interface OwnerDashboardProps {
     | 'offers'
     | 'reviews'
     | 'payments'
+    | 'payouts'
     | 'profile';
   setCurrentTab: (tab: any) => void;
 }
@@ -84,6 +96,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const [turfs, setTurfs] = useState<Turf[]>([]);
   const [selectedTurf, setSelectedTurf] = useState<Turf | null>(null);
   const [arenas, setArenas] = useState<Arena[]>([]);
+  const [allArenasMap, setAllArenasMap] = useState<Record<string, Arena[]>>({});
   const [selectedArena, setSelectedArena] = useState<Arena | null>(null);
   const [slots, setSlots] = useState<Slot[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -97,6 +110,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const [showAddSlotModal, setShowAddSlotModal] = useState<boolean>(false);
   const [showBulkSlotModal, setShowBulkSlotModal] = useState<boolean>(false);
   const [showRecurringSlotsModal, setShowRecurringSlotsModal] = useState<boolean>(false);
+  const [showSevenDayModal, setShowSevenDayModal] = useState<boolean>(false);
   const [slotViewMode, setSlotViewMode] = useState<'daily' | 'weekly'>('daily');
   const [selectedSlotDate, setSelectedSlotDate] = useState<string>(getTodayDateString());
 
@@ -150,6 +164,14 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const [editCity, setEditCity] = useState<string>(profile?.city || '');
   const [editBio, setEditBio] = useState<string>(profile?.bio || '');
   const [editBusiness, setEditBusiness] = useState<string>(profile?.businessName || '');
+  const [editUpiId, setEditUpiId] = useState<string>(profile?.paymentSettings?.upiId || '');
+  const [editBeneficiaryName, setEditBeneficiaryName] = useState<string>(
+    profile?.paymentSettings?.beneficiaryName || profile?.businessName || ''
+  );
+
+  // New Turf Payment ID state
+  const [turfUpiId, setTurfUpiId] = useState<string>('');
+  const [turfBeneficiary, setTurfBeneficiary] = useState<string>('');
 
   // Payment Settlement Dialog State
   const [settlementBooking, setSettlementBooking] = useState<Booking | null>(null);
@@ -167,13 +189,19 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
       const ownerTurfs = await getOwnerTurfs(user.uid);
       setTurfs(ownerTurfs);
 
+      const arenaMap: Record<string, Arena[]> = {};
+      for (const t of ownerTurfs) {
+        arenaMap[t.id] = await getTurfArenas(t.id);
+      }
+      setAllArenasMap(arenaMap);
+
       if (ownerTurfs.length > 0) {
         const activeT = selectedTurf && ownerTurfs.find((t) => t.id === selectedTurf.id)
           ? selectedTurf
           : ownerTurfs[0];
         setSelectedTurf(activeT);
 
-        const turfArenas = await getTurfArenas(activeT.id);
+        const turfArenas = arenaMap[activeT.id] || (await getTurfArenas(activeT.id));
         setArenas(turfArenas);
         if (turfArenas.length > 0) {
           setSelectedArena(turfArenas[0]);
@@ -264,6 +292,11 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         longitude: turfLng,
         photos: turfPhotos,
         active: true,
+        upiId: turfUpiId.trim() || profile?.paymentSettings?.upiId || undefined,
+        beneficiaryName:
+          turfBeneficiary.trim() ||
+          profile?.paymentSettings?.beneficiaryName ||
+          turfName.trim(),
       });
 
       // Automatically create a default arena for this turf
@@ -437,6 +470,42 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
       await loadData();
     } catch (err: any) {
       showToast('Failed to change slot status.', 'error');
+    }
+  };
+
+  const handleToggleTurfClosed = async (turf: Turf) => {
+    const isCurrentlyClosed = !!turf.isClosed;
+    const newClosedState = !isCurrentlyClosed;
+    let reason = '';
+    if (newClosedState) {
+      reason = prompt('Optional reason for closing turf (e.g. Heavy Rain / Maintenance / Event / Facility Upgrade):') || 'Temporary closure by turf management';
+    }
+    try {
+      await toggleTurfClosedStatus(turf.id, newClosedState, reason);
+      showToast(`Turf marked as ${newClosedState ? 'CLOSED / SHUTDOWN' : 'OPEN & ACTIVE'}.`);
+      await loadData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update turf status.', 'error');
+    }
+  };
+
+  const handleToggleArenaMaintenance = async (arena: Arena) => {
+    const isUnderMaintenance = !!arena.isUnderMaintenance;
+    const newMaintenanceState = !isUnderMaintenance;
+    let reason = '';
+    if (newMaintenanceState) {
+      reason = prompt('Reason for arena maintenance (e.g. Grass Resurfacing / Net Repairs / Lighting Upgrades):') || 'Scheduled arena maintenance';
+    }
+    try {
+      await toggleArenaMaintenance(arena.id, newMaintenanceState, reason, true);
+      showToast(`Arena "${arena.name}" is now ${newMaintenanceState ? 'UNDER MAINTENANCE (Future slots blocked)' : 'ACTIVE (Slots available)'}.`);
+      await loadData();
+      if (selectedTurf) {
+        const updatedArenas = await getTurfArenas(selectedTurf.id);
+        setArenas(updatedArenas);
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update arena maintenance mode.', 'error');
     }
   };
 
@@ -933,12 +1002,40 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                           <span className="bg-indigo-500/20 text-indigo-400 text-xs px-2.5 py-0.5 rounded-full font-bold">
                             {turf.city}
                           </span>
+                          {turf.isClosed ? (
+                            <span className="bg-rose-950/80 text-rose-300 border border-rose-500/40 text-[11px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                              <Ban className="w-3 h-3" /> Turf Closed
+                            </span>
+                          ) : (
+                            <span className="bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 text-[11px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" /> Open & Active
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-slate-400 mt-1">{turf.address}, {turf.area}</p>
                         <p className="text-xs text-slate-500 mt-0.5">Hours: {turf.openingTime} - {turf.closingTime} • Phone: {turf.phoneNumber}</p>
+                        {turf.isClosed && turf.closedReason && (
+                          <p className="text-xs text-rose-400 font-medium mt-1">
+                            Closure Note: {turf.closedReason}
+                          </p>
+                        )}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center flex-wrap gap-2">
+                        {/* Turf Closed / Open Toggle */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleTurfClosed(turf)}
+                          className={`text-xs font-bold px-3 py-2 rounded-lg border flex items-center gap-1.5 transition-all cursor-pointer ${
+                            turf.isClosed
+                              ? 'bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600 hover:text-white border-emerald-500/40'
+                              : 'bg-rose-950/40 text-rose-300 hover:bg-rose-600 hover:text-white border-rose-500/40'
+                          }`}
+                        >
+                          <Power className="w-3.5 h-3.5" />
+                          <span>{turf.isClosed ? 'Reopen Turf' : 'Close Turf'}</span>
+                        </button>
+
                         <button
                           onClick={() => {
                             setSelectedTurf(turf);
@@ -962,6 +1059,78 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
+                    </div>
+
+                    {/* Turf Verification Status & Document Upload Hub */}
+                    <OwnerVerificationCard
+                      turf={turf}
+                      ownerName={profile?.displayName || 'Owner'}
+                      onRefresh={loadData}
+                    />
+
+                    {/* Arenas breakdown with Maintenance Toggles */}
+                    <div className="bg-slate-950/60 rounded-xl p-3 border border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between text-xs font-bold text-slate-400">
+                        <span className="flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                          Turf Arenas / Pitches ({(allArenasMap[turf.id] || []).length})
+                        </span>
+                        <span className="text-[11px] text-slate-500">Arena Maintenance & Controls</span>
+                      </div>
+
+                      {(allArenasMap[turf.id] || []).length === 0 ? (
+                        <p className="text-xs text-slate-500 italic py-1">No arenas created yet. Click "+ Add Arena" above.</p>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                          {(allArenasMap[turf.id] || []).map((arena) => (
+                            <div
+                              key={arena.id}
+                              className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
+                                arena.isUnderMaintenance
+                                  ? 'bg-amber-950/30 border-amber-500/40 text-amber-200'
+                                  : 'bg-slate-900 border-slate-800 text-slate-200'
+                              }`}
+                            >
+                              <div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-xs font-bold text-white">{arena.name}</span>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                                    {arena.sport}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-400 mt-0.5">
+                                  {formatCurrency(arena.defaultPricePerHour || 1000)}/hr • Capacity: {arena.capacity || 10} players
+                                </p>
+                                {arena.isUnderMaintenance && arena.maintenanceReason && (
+                                  <p className="text-[10px] text-amber-400 italic mt-0.5">
+                                    Reason: {arena.maintenanceReason}
+                                  </p>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleArenaMaintenance(arena)}
+                                  className={`text-[11px] font-bold px-2.5 py-1.5 rounded-lg border flex items-center gap-1 transition-all cursor-pointer ${
+                                    arena.isUnderMaintenance
+                                      ? 'bg-amber-500 text-slate-950 hover:bg-amber-400 border-amber-400 shadow-sm'
+                                      : 'bg-slate-800 text-slate-300 hover:bg-amber-950/50 hover:text-amber-300 border-slate-700'
+                                  }`}
+                                  title={
+                                    arena.isUnderMaintenance
+                                      ? 'Click to finish maintenance & make slots available'
+                                      : 'Click to put arena under maintenance and block future slots'
+                                  }
+                                >
+                                  <Wrench className="w-3 h-3" />
+                                  <span>{arena.isUnderMaintenance ? 'In Maintenance' : 'Set Maint.'}</span>
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     {/* Photos Preview */}
@@ -1013,6 +1182,15 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
                 <div className="flex flex-wrap items-center gap-2">
                   <button
+                    id="open-7day-slot-btn"
+                    onClick={() => setShowSevenDayModal(true)}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-indigo-950/50 cursor-pointer"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>7-Day Generator</span>
+                  </button>
+
+                  <button
                     id="open-recurring-slot-btn"
                     onClick={() => setShowRecurringSlotsModal(true)}
                     className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-emerald-950/50 cursor-pointer"
@@ -1024,7 +1202,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                   <button
                     id="open-bulk-slot-btn"
                     onClick={() => setShowBulkSlotModal(true)}
-                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-indigo-950/50 cursor-pointer"
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md cursor-pointer"
                   >
                     <Layers className="w-3.5 h-3.5" />
                     <span>Bulk Generate</span>
@@ -1055,14 +1233,30 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                   >
                     {turfs.map((t) => (
                       <option key={t.id} value={t.id}>
-                        {t.name} ({t.city})
+                        {t.name} ({t.city}) {t.isClosed ? '🔴 [CLOSED]' : ''}
                       </option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Select Arena</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-medium text-slate-400">Select Arena</label>
+                    {selectedArena && (
+                      <button
+                        type="button"
+                        onClick={() => handleToggleArenaMaintenance(selectedArena)}
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 ${
+                          selectedArena.isUnderMaintenance
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <Wrench className="w-3 h-3" />
+                        {selectedArena.isUnderMaintenance ? 'Under Maintenance' : 'Set Maintenance'}
+                      </button>
+                    )}
+                  </div>
                   <select
                     value={selectedArena?.id || ''}
                     onChange={(e) => {
@@ -1073,7 +1267,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                   >
                     {arenas.map((a) => (
                       <option key={a.id} value={a.id}>
-                        {a.name} ({a.sport}) - {formatCurrency(a.pricePerSlot)}
+                        {a.name} ({a.sport}) {a.isUnderMaintenance ? '🔧 [MAINTENANCE]' : ''}
                       </option>
                     ))}
                   </select>
@@ -1341,8 +1535,17 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         {/* TAB: REVIEWS & RATINGS */}
         {currentTab === 'reviews' && <OwnerReviewsTab turfs={turfs} showToast={showToast} />}
 
-        {/* TAB: PAYMENTS & PLAYERS DUES */}
-        {(currentTab === 'payments' || currentTab === 'dues') && (
+        {/* TAB: OWNER PAYMENT ID & PAYOUTS */}
+        {(currentTab === 'payments' || currentTab === 'payouts') && (
+          <OwnerPaymentSettingsTab
+            turfs={turfs}
+            showToast={showToast}
+            onTurfsUpdated={loadData}
+          />
+        )}
+
+        {/* TAB: PLAYERS DUES & COUNTER SETTLEMENTS */}
+        {currentTab === 'dues' && (
           <OwnerPlayerDues
             showToast={showToast}
             onSettleBooking={(b) => {
@@ -1352,7 +1555,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
           />
         )}
 
-        {/* TAB: PROFILE */}
+        {/* TAB: PROFILE & BUSINESS SETTINGS */}
         {currentTab === 'profile' && (
           <div className="max-w-2xl mx-auto space-y-6">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
@@ -1369,6 +1572,31 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                 </div>
               </div>
 
+              {/* Quick Payment ID Banner */}
+              <div className="bg-slate-950/80 border border-indigo-500/30 rounded-2xl p-4 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                    <QrCode className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-400 block">
+                      Receiving Payment ID (UPI)
+                    </span>
+                    <span className="text-xs font-mono font-bold text-white">
+                      {profile?.paymentSettings?.upiId || 'No UPI ID configured yet'}
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentTab('payments')}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-xl transition-all shadow-md cursor-pointer"
+                >
+                  Configure Payouts →
+                </button>
+              </div>
+
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
@@ -1379,8 +1607,15 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                       city: editCity,
                       bio: editBio,
                       businessName: editBusiness,
+                      paymentSettings: {
+                        ...(profile?.paymentSettings || {}),
+                        upiId: editUpiId.trim(),
+                        beneficiaryName:
+                          editBeneficiaryName.trim() || editBusiness.trim() || editName.trim(),
+                        updatedAt: new Date().toISOString(),
+                      },
                     });
-                    showToast('Owner profile updated successfully!');
+                    showToast('Owner profile and payment ID updated successfully!');
                   } catch (err) {
                     showToast('Failed to update profile.', 'error');
                   }
@@ -1407,6 +1642,36 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                     onChange={(e) => setEditBusiness(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
                   />
+                </div>
+
+                {/* Direct Payment ID Input in Profile */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800">
+                  <div>
+                    <label className="block text-xs font-bold text-indigo-400 mb-1 flex items-center gap-1">
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>Primary UPI ID / VPA</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={editUpiId}
+                      onChange={(e) => setEditUpiId(e.target.value.toLowerCase().trim())}
+                      placeholder="e.g. turf@okhdfcbank"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-300 mb-1">
+                      Beneficiary Account Name
+                    </label>
+                    <input
+                      type="text"
+                      value={editBeneficiaryName}
+                      onChange={(e) => setEditBeneficiaryName(e.target.value)}
+                      placeholder="e.g. Apex Sports Arena"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -1443,9 +1708,9 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
                 <button
                   type="submit"
-                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg transition-all shadow-lg shadow-indigo-950/50 cursor-pointer"
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg transition-all shadow-lg shadow-indigo-950/50 cursor-pointer text-xs uppercase tracking-wider"
                 >
-                  Save Profile Changes
+                  Save Profile & Payment ID
                 </button>
               </form>
 
@@ -1576,6 +1841,43 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                   onChange={(e) => setTurfBasePrice(Number(e.target.value))}
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                 />
+              </div>
+
+              {/* Venue Payment ID / UPI configuration */}
+              <div className="bg-slate-950/80 border border-indigo-500/20 rounded-xl p-3 space-y-3">
+                <span className="text-xs font-bold text-indigo-400 block flex items-center gap-1.5">
+                  <QrCode className="w-3.5 h-3.5" />
+                  <span>Turf Direct Payment ID (UPI)</span>
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                      UPI ID / VPA (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={turfUpiId}
+                      onChange={(e) => setTurfUpiId(e.target.value.toLowerCase().trim())}
+                      placeholder={profile?.paymentSettings?.upiId || 'e.g. turf@okhdfcbank'}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                      Account / Beneficiary Name
+                    </label>
+                    <input
+                      type="text"
+                      value={turfBeneficiary}
+                      onChange={(e) => setTurfBeneficiary(e.target.value)}
+                      placeholder="e.g. Apex Arena Payouts"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Leave empty to inherit the default owner UPI ID configured in Payment Settings.
+                </p>
               </div>
 
               {/* Map Pin Selector */}
@@ -1980,6 +2282,19 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
           turfs={turfs}
           onGenerated={async () => {
             showToast('Recurring slots generated successfully!');
+            await loadData();
+          }}
+          showToast={showToast}
+        />
+      )}
+      {/* ================= MODAL: 7-DAY SLOT GENERATOR ================= */}
+      {showSevenDayModal && selectedTurf && arenas.length > 0 && (
+        <SevenDaySlotsModal
+          isOpen={showSevenDayModal}
+          onClose={() => setShowSevenDayModal(false)}
+          turf={selectedTurf}
+          arenas={arenas}
+          onSlotsGenerated={async () => {
             await loadData();
           }}
           showToast={showToast}
