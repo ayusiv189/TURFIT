@@ -122,6 +122,7 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
   // Community state & Live map data
   const [lobbies, setLobbies] = useState<Lobby[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
+  const [playerPools, setPlayerPools] = useState<any[]>([]);
   const [unreadNotifsCount, setUnreadNotifsCount] = useState<number>(0);
   const [showNotificationsModal, setShowNotificationsModal] = useState<boolean>(false);
 
@@ -229,6 +230,17 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
       const list: Match[] = [];
       snap.forEach((d) => list.push({ id: d.id, ...d.data() } as Match));
       setMatches(list);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Real-time listener for player pools
+  useEffect(() => {
+    const q = query(collection(db, 'playerPools'));
+    const unsubscribe = onSnapshot(q, (snap) => {
+      const list: any[] = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+      setPlayerPools(list);
     });
     return () => unsubscribe();
   }, []);
@@ -1074,6 +1086,159 @@ export const PlayerHome: React.FC<PlayerHomeProps> = ({ currentTab, setCurrentTa
                         </div>
                       )}
                     </div>
+
+                    {/* Live Hosted Lobbies at this Turf/Arena */}
+                    {(() => {
+                      const turfMatchingLobbies = lobbies.filter(
+                        (l) => l.turfId === selectedTurf.id || l.turfName === selectedTurf.name
+                      );
+                      return (
+                        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Sparkles className="w-4 h-4 text-emerald-400" />
+                              <h4 className="text-sm font-bold text-white">
+                                Live Hosted Match Lobbies ({turfMatchingLobbies.length})
+                              </h4>
+                            </div>
+                            <button
+                              onClick={() => setCurrentTab('lobbies')}
+                              className="text-xs text-indigo-400 hover:text-indigo-300 font-bold"
+                            >
+                              Explore All Lobbies →
+                            </button>
+                          </div>
+
+                          {turfMatchingLobbies.length === 0 ? (
+                            <div className="bg-slate-950 rounded-xl p-4 text-center border border-slate-800/80">
+                              <p className="text-xs text-slate-400">No active match lobbies hosted at this arena yet.</p>
+                              <p className="text-[11px] text-slate-500 mt-0.5">
+                                Book any slot or create a community split lobby to invite other players!
+                              </p>
+                              <button
+                                onClick={() => setCurrentTab('lobbies')}
+                                className="mt-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5 shadow-md"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Host Game Lobby</span>
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {turfMatchingLobbies.map((lobby) => (
+                                <div
+                                  key={lobby.id}
+                                  className="bg-slate-950 border border-slate-800 hover:border-emerald-500/50 rounded-xl p-3 flex items-center justify-between transition-colors"
+                                >
+                                  <div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs font-bold text-white">{lobby.lobbyName}</span>
+                                      <span className="text-[10px] bg-emerald-950 text-emerald-300 font-bold px-1.5 py-0.5 rounded border border-emerald-500/30">
+                                        {lobby.sport}
+                                      </span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-0.5">
+                                      {lobby.date} • {lobby.timeSlot} • Hosted by {lobby.hostName}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <div className="text-right">
+                                      <span className="text-xs font-bold text-emerald-400 block">
+                                        {formatCurrency(lobby.pricePerPlayer || 150)}/player
+                                      </span>
+                                      <span className="text-[10px] text-slate-400">
+                                        {lobby.currentPlayersCount || 1}/{lobby.maxPlayers || 10} players
+                                      </span>
+                                    </div>
+                                    <button
+                                      onClick={() => setCurrentTab('lobbies')}
+                                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-md cursor-pointer"
+                                    >
+                                      Join Lobby
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Pool of Interested Players for this Turf/Sport */}
+                    {(() => {
+                      const turfMatchingPools = playerPools.filter(
+                        (p) =>
+                          (selectedTurf.sports && selectedTurf.sports.includes(p.sport)) ||
+                          p.city?.toLowerCase() === selectedTurf.city?.toLowerCase()
+                      );
+                      return (
+                        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Users className="w-4 h-4 text-cyan-400" />
+                              <h4 className="text-sm font-bold text-white">
+                                Pool of Interested Players ({turfMatchingPools.length})
+                              </h4>
+                            </div>
+                            <button
+                              onClick={() => setCurrentTab('lobbies')}
+                              className="text-xs text-cyan-400 hover:text-cyan-300 font-bold"
+                            >
+                              Matchmaking Pools →
+                            </button>
+                          </div>
+
+                          {turfMatchingPools.length === 0 ? (
+                            <div className="bg-slate-950 rounded-xl p-4 text-center border border-slate-800/80">
+                              <p className="text-xs text-slate-400">No active matchmaking pool for this sport yet.</p>
+                              <p className="text-[11px] text-slate-500 mt-0.5">
+                                Join or start an interest pool to match with other athletes in {selectedTurf.city || 'your area'}.
+                              </p>
+                              <button
+                                onClick={() => setCurrentTab('lobbies')}
+                                className="mt-3 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5 shadow-md"
+                              >
+                                <UserPlus className="w-3.5 h-3.5" />
+                                <span>Join Matchmaking Pool</span>
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {turfMatchingPools.slice(0, 3).map((pool) => (
+                                <div
+                                  key={pool.id}
+                                  className="bg-slate-950 border border-slate-800 hover:border-cyan-500/50 rounded-xl p-3 flex items-center justify-between transition-colors"
+                                >
+                                  <div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs font-bold text-white">{pool.sport} Interest Pool</span>
+                                      <span className="text-[10px] bg-cyan-950 text-cyan-300 font-bold px-1.5 py-0.5 rounded border border-cyan-500/30">
+                                        {pool.matchHoursCategory}
+                                      </span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-0.5">
+                                      📍 {pool.area || pool.city} • Target: Max ₹{pool.maxPricePerPlayer}/player
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-cyan-400 font-bold">
+                                      {pool.currentPlayersCount}/{pool.requiredPlayers} players
+                                    </span>
+                                    <button
+                                      onClick={() => setCurrentTab('lobbies')}
+                                      className="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-md cursor-pointer"
+                                    >
+                                      Join Pool
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* Turf Reviews & Ratings Section */}
                     <TurfReviewsSection
