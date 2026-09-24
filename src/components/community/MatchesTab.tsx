@@ -36,8 +36,10 @@ import {
   Play,
   CheckCircle2,
   LogOut,
+  MessageSquare,
 } from 'lucide-react';
 import { PublicProfileModal } from './PublicProfileModal';
+import { GroupChatModal } from '../messaging/GroupChatModal';
 
 interface MatchesTabProps {
   initialLobbyToHost?: Lobby | null;
@@ -50,6 +52,7 @@ export const MatchesTab: React.FC<MatchesTabProps> = ({
   onClearInitialLobby,
   showToast,
 }) => {
+  const [activeChat, setActiveChat] = useState<{ id: string; name: string } | null>(null);
   const { user, profile } = useAuth();
 
   const [matches, setMatches] = useState<Match[]>([]);
@@ -369,7 +372,7 @@ export const MatchesTab: React.FC<MatchesTabProps> = ({
         teamAName: isTeamVsTeam ? (teamAObj?.name || null) : null,
         teamBId: isTeamVsTeam ? (teamBId || null) : null,
         teamBName: isTeamVsTeam ? (teamBObj?.name || null) : null,
-        description: description.trim() || `Friendly ${matchSport} fixture organized on TruFit.`,
+        description: description.trim() || `Friendly ${matchSport} fixture organized on TurFit.`,
         rules: rules.trim(),
         isPublic: isPublic,
         status: 'OPEN',
@@ -787,6 +790,16 @@ export const MatchesTab: React.FC<MatchesTabProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
+            
+            <div className="px-5 pb-2">
+              <button
+                onClick={() => setActiveChat({ id: selectedMatch.id, name: selectedMatch.matchName })}
+                className="w-full bg-slate-800 hover:bg-emerald-600 hover:text-white text-emerald-400 text-xs font-bold px-4 py-2.5 rounded-xl transition-colors flex items-center justify-center gap-2"
+              >
+                <MessageSquare className="w-4 h-4" />
+                <span>Match Chat</span>
+              </button>
+            </div>
 
             {/* Modal Body */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -882,10 +895,39 @@ export const MatchesTab: React.FC<MatchesTabProps> = ({
                       <div
                         key={p.id}
                         onClick={async () => {
+                          if (!p.uid) return;
                           try {
                             const snap = await getDoc(doc(db, 'users', p.uid));
-                            if (snap.exists()) setViewingPlayer(snap.data() as UserProfile);
-                          } catch (e) {}
+                            if (snap.exists()) {
+                              setViewingPlayer({ uid: snap.id, ...snap.data() } as UserProfile);
+                            } else {
+                              setViewingPlayer({
+                                uid: p.uid,
+                                email: 'athlete@trufit.app',
+                                displayName: p.name || 'TruFit Member',
+                                role: 'PLAYER',
+                                emailVerified: false,
+                                photoURL: p.photoURL,
+                                preferredSport: p.sport || selectedMatch.sport,
+                                createdAt: new Date().toISOString(),
+                                updatedAt: new Date().toISOString(),
+                                isPublic: true,
+                              } as UserProfile);
+                            }
+                          } catch (e) {
+                            setViewingPlayer({
+                              uid: p.uid,
+                              email: 'athlete@trufit.app',
+                              displayName: p.name || 'TruFit Member',
+                              role: 'PLAYER',
+                              emailVerified: false,
+                              photoURL: p.photoURL,
+                              preferredSport: p.sport || selectedMatch.sport,
+                              createdAt: new Date().toISOString(),
+                              updatedAt: new Date().toISOString(),
+                              isPublic: true,
+                            } as UserProfile);
+                          }
                         }}
                         className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-xl flex items-center gap-2.5 cursor-pointer hover:border-slate-700 transition-colors"
                       >
@@ -1266,6 +1308,15 @@ export const MatchesTab: React.FC<MatchesTabProps> = ({
         isOpen={!!viewingPlayer}
         onClose={() => setViewingPlayer(null)}
       />
+      {activeChat && (
+        <GroupChatModal
+          isOpen={!!activeChat}
+          groupId={activeChat.id}
+          groupName={activeChat.name}
+          groupType="match"
+          onClose={() => setActiveChat(null)}
+        />
+      )}
     </div>
   );
 };

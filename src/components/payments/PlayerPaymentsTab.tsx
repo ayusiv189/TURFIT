@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { Booking, PaymentTransaction } from '../../types';
 import { getPlayerBookings, getPaymentTransactionsForUser } from '../../lib/db';
 import { recordPlayerSharePayment } from '../../lib/phase3';
+import { openRazorpayCheckout, verifyPaymentWithOwnerBank, generateUpiUri, generateUpiQrCodeUrl } from '../../lib/razorpay';
 import { formatCurrency, formatDateString } from '../../lib/utils';
 import { PaymentSplitModal } from './PaymentSplitModal';
 import {
@@ -18,10 +19,15 @@ import {
   Users,
   ArrowUpRight,
   ShieldCheck,
+  QrCode,
+  Smartphone,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 interface PlayerPaymentsTabProps {
   showToast?: (text: string, type?: 'success' | 'error') => void;
+  onPayDue?: () => void;
 }
 
 export const PlayerPaymentsTab: React.FC<PlayerPaymentsTabProps> = ({ showToast }) => {
@@ -34,7 +40,9 @@ export const PlayerPaymentsTab: React.FC<PlayerPaymentsTabProps> = ({ showToast 
   // Direct Pay Due Dialog State
   const [payingBooking, setPayingBooking] = useState<Booking | null>(null);
   const [payAmount, setPayAmount] = useState<number>(0);
-  const [payMethod, setPayMethod] = useState<'ONLINE_UPI' | 'ONLINE_CARD' | 'CASH_AT_TURF'>('ONLINE_UPI');
+  const [payMethod, setPayMethod] = useState<'ONLINE_UPI' | 'DIRECT_OWNER_UPI' | 'CASH_AT_TURF'>('ONLINE_UPI');
+  const [directUpiRef, setDirectUpiRef] = useState<string>('');
+  const [copiedUpi, setCopiedUpi] = useState<boolean>(false);
   const [payingLoading, setPayingLoading] = useState<boolean>(false);
 
   // Split Modal State
@@ -81,15 +89,66 @@ export const PlayerPaymentsTab: React.FC<PlayerPaymentsTabProps> = ({ showToast 
 
     setPayingLoading(true);
     try {
+      let txnId = undefined;
+      let successMessage = `Payment of ₹${payAmount} recorded successfully!`;
+
+      if (payMethod === 'ONLINE_UPI') {
+        try {
+          const rzpRes = await openRazorpayCheckout({
+            amount: payAmount,
+            name: payingBooking.turfName,
+            description: `Settle Due for ${payingBooking.arenaName}`,
+            prefill: {
+              name: payingBooking.playerName || 'Athlete',
+              email: payingBooking.playerEmail || '',
+              contact: payingBooking.playerPhone || '',
+            },
+          });
+          if (rzpRes && rzpRes.paymentId) {
+            const isVerifiedWithBank = await verifyPaymentWithOwnerBank(
+              rzpRes.paymentId,
+              payAmount,
+              payingBooking.ownerId
+            );
+            if (!isVerifiedWithBank) {
+              setPayingLoading(false);
+              showToast?.('Payment verification with owner bank failed. Please try again.', 'error');
+              return;
+            }
+            txnId = rzpRes.paymentId;
+          }
+        } catch (rzpErr: any) {
+          setPayingLoading(false);
+          showToast?.(rzpErr.message || 'Payment cancelled or failed', 'error');
+          return;
+        }
+      } else if (payMethod === 'DIRECT_OWNER_UPI') {
+        if (!directUpiRef.trim()) {
+          setPayingLoading(false);
+          showToast?.('Please enter your 12-digit UPI UTR / Transaction Reference number.', 'error');
+          return;
+        }
+        successMessage = `Direct UPI payment of ₹${payAmount} reported (Ref: ${directUpiRef.trim()}). Owner has been notified to verify in their ledger.`;
+      } else if (payMethod === 'CASH_AT_TURF') {
+        // Send cash collection notification to turf owner
+        successMessage = `Cash payment notification of ₹${payAmount} sent to turf owner. Awaiting owner collection confirmation.`;
+      }
+
       await recordPlayerSharePayment({
         bookingId: payingBooking.id,
         playerId: user.uid,
         amount: payAmount,
         paymentMethod: payMethod,
-        notes: `Online player settlement of ₹${payAmount} via ${payMethod}`,
+        upiTxnRef: payMethod === 'DIRECT_OWNER_UPI' ? directUpiRef.trim() : undefined,
+        notes: payMethod === 'CASH_AT_TURF' 
+          ? `Cash payment notification sent to owner for collection of ₹${payAmount}` 
+          : payMethod === 'DIRECT_OWNER_UPI'
+            ? `Direct UPI payment reported - Ref: ${directUpiRef.trim()} (₹${payAmount})`
+            : `Online player settlement of ₹${payAmount} via UPI (${txnId || 'Direct'})`,
       });
-      showToast?.(`Payment of ₹${payAmount} recorded successfully!`, 'success');
+      showToast?.(successMessage, 'success');
       setPayingBooking(null);
+      setDirectUpiRef('');
       await loadPaymentData();
     } catch (err: any) {
       showToast?.(err.message || 'Payment failed', 'error');
@@ -256,6 +315,7 @@ export const PlayerPaymentsTab: React.FC<PlayerPaymentsTabProps> = ({ showToast 
                         onClick={() => {
                           setPayingBooking(b);
                           setPayAmount(b.amountDue);
+                          setPayMethod('ONLINE_UPI');
                         }}
                         className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 shadow-lg shadow-emerald-950/50 transition-all cursor-pointer"
                       >
@@ -347,17 +407,133 @@ export const PlayerPaymentsTab: React.FC<PlayerPaymentsTabProps> = ({ showToast 
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Payment Method</label>
-                <select
-                  value={payMethod}
-                  onChange={(e) => setPayMethod(e.target.value as any)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-white"
-                >
-                  <option value="ONLINE_UPI">Online UPI (Instant)</option>
-                  <option value="ONLINE_CARD">Debit / Credit Card</option>
-                  <option value="CASH_AT_TURF">Cash / Counter Payment</option>
-                </select>
+                <label className="block text-xs font-medium text-slate-400 mb-1.5">Select Payment Method</label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setPayMethod('ONLINE_UPI')}
+                    className={`p-3 rounded-2xl border text-left transition-all cursor-pointer ${
+                      payMethod === 'ONLINE_UPI'
+                        ? 'border-indigo-500 bg-indigo-950/50 text-white ring-2 ring-indigo-500/40'
+                        : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="text-xs font-bold text-white block mb-0.5">⚡ Online Portal</span>
+                    <span className="text-[10px] text-indigo-400">Razorpay Auto-Verify</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setPayMethod('DIRECT_OWNER_UPI')}
+                    className={`p-3 rounded-2xl border text-left transition-all cursor-pointer ${
+                      payMethod === 'DIRECT_OWNER_UPI'
+                        ? 'border-amber-500 bg-amber-950/50 text-white ring-2 ring-amber-500/40'
+                        : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="text-xs font-bold text-white block mb-0.5">📲 Direct Owner UPI</span>
+                    <span className="text-[10px] text-amber-400">Scan QR & Enter UTR</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setPayMethod('CASH_AT_TURF')}
+                    className={`p-3 rounded-2xl border text-left transition-all cursor-pointer ${
+                      payMethod === 'CASH_AT_TURF'
+                        ? 'border-emerald-500 bg-emerald-950/50 text-white ring-2 ring-emerald-500/40'
+                        : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="text-xs font-bold text-white block mb-0.5">💵 Cash at Venue</span>
+                    <span className="text-[10px] text-emerald-400">Counter Collection</span>
+                  </button>
+                </div>
               </div>
+
+              {/* Direct Owner UPI QR & UTR input */}
+              {payMethod === 'DIRECT_OWNER_UPI' && (() => {
+                const ownerUpi = payingBooking.ownerPaymentId || 'trufit.venue@okaxis';
+                const ownerName = payingBooking.turfName || 'TruFit Turf Arena';
+                const upiUri = generateUpiUri({
+                  upiId: ownerUpi,
+                  beneficiaryName: ownerName,
+                  amount: payAmount,
+                  transactionNote: `Slot Due ${payingBooking.bookingId || payingBooking.id}`,
+                });
+                const qrCodeUrl = generateUpiQrCodeUrl({
+                  upiId: ownerUpi,
+                  beneficiaryName: ownerName,
+                  amount: payAmount,
+                  transactionNote: `Slot Due ${payingBooking.bookingId || payingBooking.id}`,
+                });
+
+                return (
+                  <div className="bg-slate-950 border border-amber-500/30 rounded-2xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <QrCode className="w-4 h-4 text-amber-400" />
+                        <span className="text-xs font-bold text-white">Direct Owner UPI Settlement</span>
+                      </div>
+                      <span className="text-[10px] bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded-full">
+                        Amount: ₹{payAmount}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row items-center gap-4 bg-slate-900/80 rounded-xl p-3 border border-slate-800">
+                      <img
+                        src={qrCodeUrl}
+                        alt="Owner UPI QR"
+                        className="w-28 h-28 rounded-lg bg-white p-1 border border-slate-700 shrink-0"
+                      />
+                      <div className="space-y-2 text-left w-full">
+                        <div>
+                          <span className="text-[10px] text-slate-400 block uppercase font-bold">Owner UPI ID</span>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="font-mono text-xs text-amber-300 font-bold">{ownerUpi}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(ownerUpi);
+                                setCopiedUpi(true);
+                                setTimeout(() => setCopiedUpi(false), 2000);
+                              }}
+                              className="text-slate-400 hover:text-white transition-colors"
+                              title="Copy UPI ID"
+                            >
+                              {copiedUpi ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        <a
+                          href={upiUri}
+                          className="inline-flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] px-3 py-1.5 rounded-xl transition-all shadow-md shadow-amber-950/40"
+                        >
+                          <Smartphone className="w-3.5 h-3.5" />
+                          <span>Open in UPI App (GPay/PhonePe)</span>
+                        </a>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        Enter UPI Transaction ID / 12-digit UTR <span className="text-rose-400">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 423589123456"
+                        value={directUpiRef}
+                        onChange={(e) => setDirectUpiRef(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white font-mono placeholder:text-slate-600 focus:border-amber-500 outline-none"
+                        required={payMethod === 'DIRECT_OWNER_UPI'}
+                      />
+                      <span className="text-[10px] text-slate-400 mt-1 block">
+                        Found in your UPI app receipt after payment. Owner uses this to verify settlement.
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div className="flex gap-3 pt-2">
                 <button

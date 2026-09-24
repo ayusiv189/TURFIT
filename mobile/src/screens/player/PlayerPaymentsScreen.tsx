@@ -14,32 +14,44 @@ import { useAuth } from '../../contexts/AuthContext';
 import {
   listenPlayerDues,
   listenPlayerBookings,
+  listenPlayerFinancialLedger,
   payPlayerDue,
   payAllPlayerDues,
+  getTurfById,
+  getAdminPaymentConfig,
 } from '../../services/dbService';
-import { Booking, PlayerDue } from '../../types';
+import { Booking, PlayerDue, FinancialLedgerEntry } from '../../types';
+import { DirectUpiModal } from '../../components/DirectUpiModal';
 import {
   CreditCard,
   CheckCircle,
   AlertCircle,
   Clock,
   ArrowUpRight,
+  ArrowDownLeft,
   ShieldCheck,
   QrCode,
   Copy,
   Receipt,
   Wallet,
+  FileText,
+  DollarSign,
+  UserX,
+  RotateCcw,
 } from 'lucide-react-native';
 
 export const PlayerPaymentsScreen: React.FC = () => {
   const { user, profile } = useAuth();
   const [dues, setDues] = useState<PlayerDue[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
-  const [activeTab, setActiveTab] = useState<'DUES' | 'HISTORY'>('DUES');
-  const [refreshing, setRefreshing] = useState(false);
+  const [ledgerEntries, setLedgerEntries] = useState<FinancialLedgerEntry[]>([]);
+  const [activeTab, setActiveTab] = useState<'DUES' | 'HISTORY' | 'LEDGER'>('DUES');
 
   // Pay Due Modal State
   const [selectedDueToPay, setSelectedDueToPay] = useState<PlayerDue | null>(null);
+  const [adminPaymentConfig, setAdminPaymentConfig] = useState<any>(null);
+  const [dueTurfUpiId, setDueTurfUpiId] = useState('turfit.sports@okaxis');
+  const [dueTurfBeneficiary, setDueTurfBeneficiary] = useState('TruFit Sports Admin');
   const [payAllMode, setPayAllMode] = useState(false);
   const [showPayModal, setShowPayModal] = useState(false);
   const [upiRefId, setUpiRefId] = useState('');
@@ -47,7 +59,17 @@ export const PlayerPaymentsScreen: React.FC = () => {
   const [paymentInProgress, setPaymentInProgress] = useState(false);
   const [paymentSuccess, setPaymentSuccess] = useState(false);
 
-  // Real-time listener for dues and bookings
+  // Real-time listeners & Admin Config
+  useEffect(() => {
+    getAdminPaymentConfig().then((cfg) => {
+      if (cfg) {
+        setAdminPaymentConfig(cfg);
+        if (cfg.upiId) setDueTurfUpiId(cfg.upiId);
+        if (cfg.beneficiaryName) setDueTurfBeneficiary(cfg.beneficiaryName);
+      }
+    }).catch((err) => console.warn('Error loading admin payment config:', err));
+  }, []);
+
   useEffect(() => {
     if (!user) return;
     const unsubDues = listenPlayerDues(user.uid, (updatedDues) => {
@@ -56,20 +78,28 @@ export const PlayerPaymentsScreen: React.FC = () => {
     const unsubBookings = listenPlayerBookings(user.uid, (updatedBookings) => {
       setBookings(updatedBookings);
     });
+    const unsubLedger = listenPlayerFinancialLedger(user.uid, (updatedLedger) => {
+      setLedgerEntries(updatedLedger);
+    });
 
     return () => {
       unsubDues();
       unsubBookings();
+      unsubLedger();
     };
   }, [user]);
 
   const totalOutstandingDue = dues.reduce((acc, d) => acc + (d.remainingAmount || 0), 0);
   const totalPaid = bookings.reduce((acc, b) => acc + (b.amountPaid || 0), 0);
 
-  const handleOpenPaySingleDue = (due: PlayerDue) => {
+  const handleOpenPaySingleDue = async (due: PlayerDue) => {
     setSelectedDueToPay(due);
     setPayAllMode(false);
     setPaymentSuccess(false);
+    if (adminPaymentConfig?.upiId) {
+      setDueTurfUpiId(adminPaymentConfig.upiId);
+      setDueTurfBeneficiary(adminPaymentConfig.beneficiaryName || 'TruFit Sports Admin');
+    }
     setShowPayModal(true);
   };
 
@@ -158,7 +188,16 @@ export const PlayerPaymentsScreen: React.FC = () => {
           onPress={() => setActiveTab('HISTORY')}
         >
           <Text style={[styles.tabBtnText, activeTab === 'HISTORY' && styles.tabBtnTextActive]}>
-            Booking & Txn History ({bookings.length})
+            Bookings ({bookings.length})
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.tabBtn, activeTab === 'LEDGER' && styles.tabBtnActive]}
+          onPress={() => setActiveTab('LEDGER')}
+        >
+          <Text style={[styles.tabBtnText, activeTab === 'LEDGER' && styles.tabBtnTextActive]}>
+            Ledger Trail ({ledgerEntries.length})
           </Text>
         </TouchableOpacity>
       </View>
@@ -176,6 +215,13 @@ export const PlayerPaymentsScreen: React.FC = () => {
                   <Text style={styles.dueMeta}>
                     {item.date} • {item.startTime ? `${item.startTime} - ${item.endTime}` : 'Slot Due'}
                   </Text>
+                  {item.dueType && (
+                    <View style={styles.dueTypeBadge}>
+                      <Text style={styles.dueTypeBadgeText}>
+                        {item.dueType === 'NO_SHOW_PENALTY' ? 'NO-SHOW PENALTY' : item.dueType === 'PARTIAL_PAYMENT_BALANCE' ? 'ADVANCE BALANCE' : 'MATCH DUE'}
+                      </Text>
+                    </View>
+                  )}
                   {item.bookingRef && (
                     <Text style={styles.dueRefText}>Ref: {item.bookingRef}</Text>
                   )}
@@ -209,7 +255,7 @@ export const PlayerPaymentsScreen: React.FC = () => {
             </View>
           }
         />
-      ) : (
+      ) : activeTab === 'HISTORY' ? (
         <FlatList
           data={bookings}
           keyExtractor={(item) => item.id}
@@ -273,89 +319,87 @@ export const PlayerPaymentsScreen: React.FC = () => {
             </View>
           }
         />
+      ) : (
+        <FlatList
+          data={ledgerEntries}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.listContent}
+          renderItem={({ item }) => {
+            const isCredit = item.entryType === 'REFUND_CREDIT';
+            return (
+              <View style={styles.ledgerCard}>
+                <View style={styles.ledgerHeader}>
+                  <View style={styles.ledgerIconBox}>
+                    {isCredit ? (
+                      <ArrowDownLeft size={16} color="#10b981" />
+                    ) : item.entryType === 'NO_SHOW_PENALTY' ? (
+                      <UserX size={16} color="#ef4444" />
+                    ) : item.entryType === 'DUE_SETTLEMENT' ? (
+                      <CheckCircle size={16} color="#38bdf8" />
+                    ) : (
+                      <ArrowUpRight size={16} color="#f59e0b" />
+                    )}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.ledgerTitle}>{item.turfName || 'Match Transaction'}</Text>
+                    <Text style={styles.ledgerDesc}>{item.description}</Text>
+                    <Text style={styles.ledgerTime}>{new Date(item.timestamp || item.createdAt).toLocaleString()}</Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={[styles.ledgerAmount, isCredit && styles.ledgerAmountCredit]}>
+                      {isCredit ? '+' : ''}₹{item.amount}
+                    </Text>
+                    <View style={styles.idempotencyBadge}>
+                      <Text style={styles.idempotencyText}>Verified</Text>
+                    </View>
+                  </View>
+                </View>
+              </View>
+            );
+          }}
+          ListEmptyComponent={
+            <View style={styles.emptyBox}>
+              <FileText size={40} color="#64748b" />
+              <Text style={styles.emptyTitle}>No Financial Entries</Text>
+              <Text style={styles.emptyDesc}>Your immutable transaction logs will appear here.</Text>
+            </View>
+          }
+        />
       )}
 
-      {/* Pay Due Modal */}
-      <Modal visible={showPayModal} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.upiCard}>
-            {paymentSuccess ? (
-              <View style={{ alignItems: 'center', paddingVertical: 20 }}>
-                <CheckCircle size={56} color="#10b981" />
-                <Text style={styles.successTitle}>Payment Verified!</Text>
-                <Text style={styles.successSub}>₹{amountToPayNow} has been settled from your dues.</Text>
-              </View>
-            ) : (
-              <>
-                <View style={styles.upiHeader}>
-                  <QrCode size={26} color="#10b981" />
-                  <View>
-                    <Text style={styles.upiTitle}>Pay Dues via UPI</Text>
-                    <Text style={styles.upiSubtitle}>
-                      {payAllMode ? 'Settling All Outstanding Dues' : `Settling Due for ${selectedDueToPay?.turfName}`}
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={styles.upiAmountBox}>
-                  <Text style={styles.upiAmountLabel}>Amount to Pay</Text>
-                  <Text style={styles.upiAmountValue}>₹{amountToPayNow}</Text>
-                  <Text style={styles.upiBeneficiary}>
-                    Paying to: {selectedDueToPay?.turfName || 'TruFit Sports'}
-                  </Text>
-                </View>
-
-                {/* UPI VPA Box */}
-                <View style={styles.upiIdBox}>
-                  <View>
-                    <Text style={styles.upiIdLabel}>UPI ID / VPA</Text>
-                    <Text style={styles.upiIdValue}>trufit.pay@okaxis</Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.copyBtn}
-                    onPress={() => {
-                      setUpiCopied(true);
-                      setTimeout(() => setUpiCopied(false), 2000);
-                    }}
-                  >
-                    <Copy size={14} color="#10b981" />
-                    <Text style={styles.copyBtnText}>{upiCopied ? 'Copied' : 'Copy'}</Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* UTR Input */}
-                <Text style={styles.utrLabel}>UPI Reference / UTR Number (Optional)</Text>
-                <TextInput
-                  style={styles.utrInput}
-                  placeholder="e.g. 508219382910"
-                  placeholderTextColor="#64748b"
-                  value={upiRefId}
-                  onChangeText={setUpiRefId}
-                />
-
-                <TouchableOpacity
-                  style={[styles.upiSubmitBtn, paymentInProgress && styles.disabledButton]}
-                  disabled={paymentInProgress}
-                  onPress={handleConfirmDuePayment}
-                >
-                  {paymentInProgress ? (
-                    <ActivityIndicator color="#064e3b" />
-                  ) : (
-                    <Text style={styles.upiSubmitText}>Confirm Payment of ₹{amountToPayNow}</Text>
-                  )}
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.upiCancelBtn}
-                  onPress={() => setShowPayModal(false)}
-                >
-                  <Text style={styles.upiCancelText}>Cancel</Text>
-                </TouchableOpacity>
-              </>
-            )}
-          </View>
-        </View>
-      </Modal>
+      {/* Direct UPI Intent & Dynamic QR Modal */}
+      <DirectUpiModal
+        visible={showPayModal}
+        onClose={() => setShowPayModal(false)}
+        amount={amountToPayNow}
+        upiId={dueTurfUpiId}
+        payeeName={dueTurfBeneficiary}
+        transactionNote={
+          payAllMode
+            ? 'Settle All TurFit Player Dues'
+            : `Due for ${selectedDueToPay?.turfName} (${selectedDueToPay?.date || 'Match'})`
+        }
+        bookingRef={selectedDueToPay?.bookingRef || selectedDueToPay?.id?.slice(-8) || `DUE${Date.now().toString().slice(-6)}`}
+        subTitle={
+          payAllMode
+            ? '0% Fee Settlement for All Dues'
+            : `0% Fee Direct Settlement to ${dueTurfBeneficiary}`
+        }
+        turfId={selectedDueToPay?.turfId}
+        ownerId={selectedDueToPay?.ownerId}
+        playerId={user?.uid}
+        isMerchantUpi={true}
+        merchantProvider="PHONEPE_BUSINESS"
+        onConfirmPayment={async (utrRef) => {
+          if (!user) return;
+          if (payAllMode) {
+            await payAllPlayerDues(dues, 'UPI', utrRef);
+          } else if (selectedDueToPay) {
+            await payPlayerDue(selectedDueToPay.id, selectedDueToPay.remainingAmount, 'UPI', utrRef);
+          }
+          setShowPayModal(false);
+        }}
+      />
     </View>
   );
 };
@@ -367,135 +411,146 @@ const styles = StyleSheet.create({
   },
   metricsRow: {
     flexDirection: 'row',
+    padding: 16,
     gap: 12,
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    marginBottom: 12,
   },
   metricCard: {
     flex: 1,
-    backgroundColor: '#131b2e',
-    borderRadius: 16,
-    padding: 16,
+    borderRadius: 14,
+    padding: 14,
     borderWidth: 1,
-    borderColor: '#1e293b',
-  },
-  paidMetricCard: {
-    borderLeftWidth: 3,
-    borderLeftColor: '#10b981',
   },
   dueMetricCard: {
-    borderLeftWidth: 3,
-    borderLeftColor: '#f59e0b',
+    backgroundColor: 'rgba(245, 158, 11, 0.08)',
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+  },
+  paidMetricCard: {
+    backgroundColor: 'rgba(16, 185, 129, 0.08)',
+    borderColor: 'rgba(16, 185, 129, 0.3)',
   },
   metricLabel: {
     fontSize: 11,
     color: '#94a3b8',
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  metricValuePaid: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: '#10b981',
+    fontWeight: '600',
   },
   metricValueDue: {
     fontSize: 22,
-    fontWeight: '900',
+    fontWeight: '800',
     color: '#f59e0b',
+    marginVertical: 2,
+  },
+  metricValuePaid: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: '#10b981',
+    marginVertical: 2,
   },
   metricSub: {
-    fontSize: 10,
+    fontSize: 11,
     color: '#64748b',
-    marginTop: 4,
   },
   payAllBanner: {
-    backgroundColor: 'rgba(245, 158, 11, 0.12)',
-    borderWidth: 1,
-    borderColor: '#f59e0b',
-    borderRadius: 14,
-    padding: 14,
-    marginHorizontal: 16,
-    marginBottom: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    backgroundColor: '#131b2e',
+    marginHorizontal: 16,
+    marginBottom: 12,
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b',
   },
   payAllTitle: {
     fontSize: 13,
-    fontWeight: '800',
-    color: '#f59e0b',
+    fontWeight: '700',
+    color: '#f8fafc',
   },
   payAllSub: {
     fontSize: 11,
-    color: '#cbd5e1',
+    color: '#94a3b8',
     marginTop: 2,
   },
   payAllBtn: {
-    backgroundColor: '#f59e0b',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 10,
+    backgroundColor: '#10b981',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
   payAllBtnText: {
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '700',
     color: '#064e3b',
   },
   tabContainer: {
     flexDirection: 'row',
-    marginHorizontal: 16,
-    marginBottom: 12,
-    backgroundColor: '#131b2e',
-    borderRadius: 12,
-    padding: 4,
+    backgroundColor: '#0f172a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
   },
   tabBtn: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 8,
     alignItems: 'center',
     borderRadius: 8,
   },
   tabBtnActive: {
-    backgroundColor: '#10b981',
+    backgroundColor: '#1e293b',
   },
   tabBtnText: {
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
     color: '#94a3b8',
   },
   tabBtnTextActive: {
-    color: '#064e3b',
+    color: '#10b981',
   },
   listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 24,
+    padding: 16,
+    paddingBottom: 60,
   },
   dueCard: {
     backgroundColor: '#131b2e',
     borderRadius: 14,
     padding: 14,
-    marginBottom: 10,
     borderWidth: 1,
     borderColor: '#1e293b',
+    marginBottom: 12,
   },
   dueCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 12,
+    alignItems: 'flex-start',
+    marginBottom: 10,
   },
   turfName: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f8fafc',
   },
   dueMeta: {
-    fontSize: 11,
+    fontSize: 12,
     color: '#94a3b8',
     marginTop: 2,
+  },
+  dueTypeBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginTop: 4,
+  },
+  dueTypeBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#38bdf8',
   },
   dueRefText: {
     fontSize: 10,
@@ -507,33 +562,29 @@ const styles = StyleSheet.create({
   },
   dueAmountLabel: {
     fontSize: 10,
-    color: '#64748b',
+    color: '#94a3b8',
   },
   dueAmountVal: {
     fontSize: 18,
-    fontWeight: '900',
+    fontWeight: '800',
     color: '#f59e0b',
   },
   dueCardFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: '#1e293b',
-    paddingTop: 10,
   },
   dueStatusPill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
   },
   dueStatusText: {
-    fontSize: 10,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '600',
     color: '#f59e0b',
   },
   paySingleBtn: {
@@ -541,44 +592,45 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     backgroundColor: '#10b981',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 8,
   },
   paySingleBtnText: {
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '700',
     color: '#064e3b',
   },
   txCard: {
     backgroundColor: '#131b2e',
     borderRadius: 14,
     padding: 14,
-    marginBottom: 10,
     borderWidth: 1,
     borderColor: '#1e293b',
+    marginBottom: 10,
   },
   txHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    alignItems: 'flex-start',
+    marginBottom: 8,
   },
   txDate: {
-    fontSize: 11,
+    fontSize: 12,
     color: '#94a3b8',
     marginTop: 2,
   },
   txAmount: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#f8fafc',
   },
   splitRow: {
     flexDirection: 'row',
+    alignItems: 'center',
+    paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: '#1e293b',
-    paddingTop: 10,
-    alignItems: 'center',
   },
   splitItem: {
     flex: 1,
@@ -588,16 +640,16 @@ const styles = StyleSheet.create({
   },
   splitLabel: {
     fontSize: 10,
-    color: '#64748b',
+    color: '#94a3b8',
   },
   splitValuePaid: {
-    fontSize: 13,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '700',
     color: '#10b981',
   },
   splitValueDue: {
-    fontSize: 13,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '700',
     color: '#94a3b8',
   },
   splitHighlight: {
@@ -605,7 +657,7 @@ const styles = StyleSheet.create({
   },
   badge: {
     paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingVertical: 3,
     borderRadius: 6,
   },
   badgePaid: {
@@ -619,7 +671,7 @@ const styles = StyleSheet.create({
   },
   badgeText: {
     fontSize: 10,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   badgeTextPaid: {
     color: '#10b981',
@@ -630,26 +682,81 @@ const styles = StyleSheet.create({
   badgeTextCancelled: {
     color: '#ef4444',
   },
+  ledgerCard: {
+    backgroundColor: '#131b2e',
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginBottom: 8,
+  },
+  ledgerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  ledgerIconBox: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: '#0a0f1d',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ledgerTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#f8fafc',
+  },
+  ledgerDesc: {
+    fontSize: 11,
+    color: '#cbd5e1',
+    marginTop: 1,
+  },
+  ledgerTime: {
+    fontSize: 10,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  ledgerAmount: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#f8fafc',
+  },
+  ledgerAmountCredit: {
+    color: '#10b981',
+  },
+  idempotencyBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginTop: 4,
+  },
+  idempotencyText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#10b981',
+  },
   emptyBox: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 48,
+    paddingVertical: 60,
   },
   emptyTitle: {
     fontSize: 16,
-    fontWeight: '800',
-    color: '#ffffff',
+    fontWeight: '700',
+    color: '#f8fafc',
     marginTop: 12,
   },
   emptyDesc: {
     fontSize: 12,
-    color: '#64748b',
+    color: '#94a3b8',
     marginTop: 4,
-    textAlign: 'center',
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    backgroundColor: 'rgba(0,0,0,0.85)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
@@ -659,130 +766,126 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 20,
     width: '100%',
-    maxWidth: 400,
+    maxWidth: 380,
     borderWidth: 1,
     borderColor: '#1e293b',
   },
   upiHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    marginBottom: 16,
+    gap: 10,
+    marginBottom: 14,
   },
   upiTitle: {
     fontSize: 16,
-    fontWeight: '800',
-    color: '#ffffff',
+    fontWeight: '700',
+    color: '#f8fafc',
   },
   upiSubtitle: {
     fontSize: 11,
     color: '#94a3b8',
   },
   upiAmountBox: {
-    backgroundColor: '#0b1120',
+    backgroundColor: '#0a0f1d',
     borderRadius: 12,
-    padding: 14,
+    padding: 12,
     alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: 12,
   },
   upiAmountLabel: {
     fontSize: 11,
     color: '#94a3b8',
   },
   upiAmountValue: {
-    fontSize: 26,
-    fontWeight: '900',
+    fontSize: 24,
+    fontWeight: '800',
     color: '#10b981',
-    marginVertical: 4,
+    marginVertical: 2,
   },
   upiBeneficiary: {
     fontSize: 11,
     color: '#cbd5e1',
   },
   upiIdBox: {
-    backgroundColor: '#0b1120',
-    borderRadius: 12,
-    padding: 12,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    backgroundColor: '#0a0f1d',
+    borderRadius: 8,
+    padding: 10,
     marginBottom: 12,
   },
   upiIdLabel: {
     fontSize: 10,
-    color: '#64748b',
+    color: '#94a3b8',
   },
   upiIdValue: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
-    color: '#ffffff',
-    marginTop: 2,
+    color: '#f8fafc',
   },
   copyBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(16, 185, 129, 0.12)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
   copyBtnText: {
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '600',
     color: '#10b981',
   },
   utrLabel: {
     fontSize: 11,
     color: '#94a3b8',
-    marginBottom: 6,
+    marginBottom: 4,
   },
   utrInput: {
-    backgroundColor: '#0b1120',
-    borderRadius: 10,
+    backgroundColor: '#0a0f1d',
+    borderRadius: 8,
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#ffffff',
+    paddingVertical: 8,
+    color: '#f8fafc',
     fontSize: 13,
     borderWidth: 1,
-    borderColor: '#1e293b',
-    marginBottom: 12,
+    borderColor: '#334155',
+    marginBottom: 14,
   },
   upiSubmitBtn: {
     backgroundColor: '#10b981',
-    borderRadius: 12,
+    borderRadius: 10,
     paddingVertical: 12,
     alignItems: 'center',
     marginBottom: 8,
   },
   upiSubmitText: {
-    fontSize: 13,
-    fontWeight: '800',
     color: '#064e3b',
+    fontSize: 13,
+    fontWeight: '700',
   },
   upiCancelBtn: {
-    paddingVertical: 10,
+    paddingVertical: 8,
     alignItems: 'center',
   },
   upiCancelText: {
-    fontSize: 12,
-    fontWeight: '700',
     color: '#94a3b8',
-  },
-  disabledButton: {
-    backgroundColor: '#334155',
-    opacity: 0.6,
+    fontSize: 12,
   },
   successTitle: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: '#ffffff',
-    marginTop: 12,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#10b981',
+    marginTop: 8,
   },
   successSub: {
     fontSize: 12,
-    color: '#94a3b8',
+    color: '#cbd5e1',
     marginTop: 4,
-    textAlign: 'center',
+  },
+  disabledButton: {
+    opacity: 0.6,
   },
 });

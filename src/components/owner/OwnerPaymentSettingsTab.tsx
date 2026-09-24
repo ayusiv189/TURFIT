@@ -1,29 +1,44 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Turf, OwnerPaymentSettings } from '../../types';
-import { updateOwnerPaymentSettings, saveTurfPaymentSettings } from '../../lib/db';
-import { readFileAsDataURL } from '../../lib/utils';
+import { Turf, PlanFeatureConfig, DEFAULT_PLAN_FEATURES, OwnerPayoutRequest } from '../../types';
+import { calculateStandardBookingFinancials } from '../../lib/utils';
 import {
-  CreditCard,
-  QrCode,
-  CheckCircle2,
-  AlertCircle,
-  Copy,
-  Check,
-  Building2,
+  getOwnerBookings,
+  getOwnerPayoutRequests,
+  listenOwnerPayoutRequests,
+  deleteOwnerTestData,
+  updateTurf,
+  getEffectiveOwnerPlanFeatures,
+  cancelOwnerPayoutRequest,
+} from '../../lib/db';
+import {
   ShieldCheck,
-  Zap,
   DollarSign,
-  Smartphone,
   Landmark,
   Save,
-  Eye,
-  HelpCircle,
-  Sparkles,
-  Upload,
   Info,
-  RefreshCw,
+  Trash2,
+  Wallet,
+  Clock,
+  CheckCircle2,
+  AlertCircle,
+  Building2,
+  Smartphone,
+  Receipt,
+  ArrowDownToLine,
+  CreditCard,
+  Banknote,
+  ToggleLeft,
+  ToggleRight,
+  Lock,
+  XCircle,
+  History,
+  Filter,
+  Eye,
+  ExternalLink,
 } from 'lucide-react';
+import { OwnerWithdrawalModal } from './OwnerWithdrawalModal';
+import { OwnerPayoutReceiptModal } from './OwnerPayoutReceiptModal';
 
 interface OwnerPaymentSettingsTabProps {
   turfs: Turf[];
@@ -38,417 +53,461 @@ export const OwnerPaymentSettingsTab: React.FC<OwnerPaymentSettingsTabProps> = (
 }) => {
   const { user, profile, updateUserProfile } = useAuth();
 
-  const existingSettings: OwnerPaymentSettings = profile?.paymentSettings || {};
+  // Payout Destination Preferences for receiving settlements from Admin
+  const existingPayout = profile?.paymentSettings || {};
+  const [payoutUpi, setPayoutUpi] = useState<string>(existingPayout.upiId || '');
+  const [payoutBankName, setPayoutBankName] = useState<string>(existingPayout.bankName || '');
+  const [payoutAccountNumber, setPayoutAccountNumber] = useState<string>(existingPayout.accountNumber || '');
+  const [payoutIfscCode, setPayoutIfscCode] = useState<string>(existingPayout.ifscCode || '');
+  const [payoutBeneficiary, setPayoutBeneficiary] = useState<string>(
+    existingPayout.beneficiaryName || profile?.businessName || profile?.displayName || ''
+  );
+  const [savingPayoutPref, setSavingPayoutPref] = useState<boolean>(false);
 
-  // Form State
-  const [upiId, setUpiId] = useState<string>(existingSettings.upiId || '');
-  const [beneficiaryName, setBeneficiaryName] = useState<string>(
-    existingSettings.beneficiaryName || profile?.businessName || profile?.displayName || ''
-  );
-  const [razorpayAccountId, setRazorpayAccountId] = useState<string>(
-    existingSettings.razorpayAccountId || ''
-  );
-  const [razorpayKeyId, setRazorpayKeyId] = useState<string>(
-    existingSettings.razorpayKeyId || ''
-  );
-  const [bankName, setBankName] = useState<string>(existingSettings.bankName || '');
-  const [accountNumber, setAccountNumber] = useState<string>(
-    existingSettings.accountNumber || ''
-  );
-  const [ifscCode, setIfscCode] = useState<string>(existingSettings.ifscCode || '');
-  const [qrCodeUrl, setQrCodeUrl] = useState<string>(existingSettings.qrCodeUrl || '');
-  const [paymentInstructions, setPaymentInstructions] = useState<string>(
-    existingSettings.paymentInstructions ||
-      'Please mention your Booking ID in the UPI payment remarks. Show payment confirmation at the venue counter.'
-  );
+  // Modals & Selection States
+  const [showWithdrawModal, setShowWithdrawModal] = useState<boolean>(false);
+  const [selectedReceiptRequest, setSelectedReceiptRequest] = useState<OwnerPayoutRequest | null>(null);
+  const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null);
 
-  // Accepted methods
-  const [allowDirectUpi, setAllowDirectUpi] = useState<boolean>(
-    existingSettings.allowDirectUpi !== false
-  );
-  const [allowOnlineRazorpay, setAllowOnlineRazorpay] = useState<boolean>(
-    existingSettings.allowOnlineRazorpay !== false
-  );
-  const [allowPayAtVenue, setAllowPayAtVenue] = useState<boolean>(
-    existingSettings.allowPayAtVenue !== false
-  );
+  const [bookings, setBookings] = useState<any[]>([]);
+  const [payoutRequests, setPayoutRequests] = useState<OwnerPayoutRequest[]>([]);
+  const [loadingWallet, setLoadingWallet] = useState<boolean>(true);
+  const [planFeatures, setPlanFeatures] = useState<PlanFeatureConfig>(DEFAULT_PLAN_FEATURES);
+  const [historyFilter, setHistoryFilter] = useState<'ALL' | 'REQUESTED' | 'COMPLETED' | 'REJECTED'>('ALL');
 
-  // Selected Turf for venue-specific override
-  const [selectedTurfId, setSelectedTurfId] = useState<string>('ALL');
-  const [saving, setSaving] = useState<boolean>(false);
-  const [copiedUpi, setCopiedUpi] = useState<boolean>(false);
-  const [testedVerified, setTestedVerified] = useState<boolean>(!!existingSettings.upiId);
-
-  // Sync state when profile loads
   useEffect(() => {
-    if (profile?.paymentSettings) {
-      const s = profile.paymentSettings;
-      setUpiId(s.upiId || '');
-      setBeneficiaryName(s.beneficiaryName || profile?.businessName || profile?.displayName || '');
-      setRazorpayAccountId(s.razorpayAccountId || '');
-      setRazorpayKeyId(s.razorpayKeyId || '');
-      setBankName(s.bankName || '');
-      setAccountNumber(s.accountNumber || '');
-      setIfscCode(s.ifscCode || '');
-      setQrCodeUrl(s.qrCodeUrl || '');
-      setPaymentInstructions(
-        s.paymentInstructions ||
-          'Please mention your Booking ID in the UPI payment remarks. Show payment confirmation at the venue counter.'
-      );
-      setAllowDirectUpi(s.allowDirectUpi !== false);
-      setAllowOnlineRazorpay(s.allowOnlineRazorpay !== false);
-      setAllowPayAtVenue(s.allowPayAtVenue !== false);
-      setTestedVerified(!!s.upiId);
-    }
-  }, [profile]);
-
-  // Handle Turf selection switch
-  const handleTurfSelect = (tId: string) => {
-    setSelectedTurfId(tId);
-    if (tId === 'ALL') {
-      const s = profile?.paymentSettings || {};
-      setUpiId(s.upiId || '');
-      setBeneficiaryName(s.beneficiaryName || profile?.businessName || profile?.displayName || '');
-    } else {
-      const turf = turfs.find((t) => t.id === tId);
-      if (turf) {
-        setUpiId(turf.upiId || turf.paymentSettings?.upiId || profile?.paymentSettings?.upiId || '');
-        setBeneficiaryName(
-          turf.beneficiaryName ||
-            turf.paymentSettings?.beneficiaryName ||
-            turf.name ||
-            profile?.businessName ||
-            ''
-        );
-      }
-    }
-  };
-
-  const handleCopyUpi = () => {
-    if (!upiId) return;
-    navigator.clipboard.writeText(upiId);
-    setCopiedUpi(true);
-    setTimeout(() => setCopiedUpi(false), 2000);
-    showToast('UPI ID copied to clipboard!');
-  };
-
-  const handleQrUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const dataUrl = await readFileAsDataURL(file);
-      setQrCodeUrl(dataUrl);
-      showToast('Custom QR Code standee uploaded successfully!');
-    } catch (err) {
-      showToast('Failed to read image file.', 'error');
-    }
-  };
-
-  // Generate UPI QR Code URL for preview
-  const encodedUpiUrl = `upi://pay?pa=${encodeURIComponent(upiId || 'turfowner@upi')}&pn=${encodeURIComponent(
-    beneficiaryName || 'Turf Venue'
-  )}&cu=INR&tn=TurfSlotBooking`;
-  const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(
-    encodedUpiUrl
-  )}`;
-
-  const isValidUpi = upiId.includes('@') && upiId.length >= 5;
-
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user) return;
-
-    if (upiId && !isValidUpi) {
-      showToast('Please enter a valid UPI ID (e.g. yourname@bank or 9876543210@paytm)', 'error');
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const settingsPayload: OwnerPaymentSettings = {
-        upiId: upiId.trim(),
-        beneficiaryName: beneficiaryName.trim(),
-        razorpayAccountId: razorpayAccountId.trim() || undefined,
-        razorpayKeyId: razorpayKeyId.trim() || undefined,
-        bankName: bankName.trim() || undefined,
-        accountNumber: accountNumber.trim() || undefined,
-        ifscCode: ifscCode.trim().toUpperCase() || undefined,
-        qrCodeUrl: qrCodeUrl || undefined,
-        allowDirectUpi,
-        allowOnlineRazorpay,
-        allowPayAtVenue,
-        paymentInstructions: paymentInstructions.trim(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      // 1. Update Owner User Profile
-      await updateOwnerPaymentSettings(user.uid, settingsPayload);
-      await updateUserProfile({
-        paymentSettings: settingsPayload,
+    if (user?.uid) {
+      loadWalletData();
+      getEffectiveOwnerPlanFeatures(user.uid).then((feats) => {
+        if (feats) setPlanFeatures(feats);
       });
 
-      // 2. If specific turf or all turfs, sync with Turf document
-      if (selectedTurfId === 'ALL') {
-        for (const t of turfs) {
-          await saveTurfPaymentSettings(t.id, {
-            upiId: upiId.trim(),
-            beneficiaryName: beneficiaryName.trim(),
-            paymentSettings: settingsPayload,
-          });
-        }
-      } else {
-        await saveTurfPaymentSettings(selectedTurfId, {
-          upiId: upiId.trim(),
-          beneficiaryName: beneficiaryName.trim(),
-          paymentSettings: settingsPayload,
-        });
-      }
+      const unsub = listenOwnerPayoutRequests(user.uid, (reqs: any) => {
+        setPayoutRequests(reqs);
+      });
+      return () => unsub();
+    }
+  }, [user]);
 
-      setTestedVerified(true);
-      showToast('Payment ID & Payout settings saved successfully! Athletes can now pay directly to your account.');
-      onTurfsUpdated?.();
-    } catch (err: any) {
-      console.error('Error saving payment settings:', err);
-      showToast(err.message || 'Failed to save payment settings', 'error');
+  const loadWalletData = async () => {
+    if (!user?.uid) return;
+    try {
+      setLoadingWallet(true);
+      const ownerBookings = await getOwnerBookings(user.uid);
+      setBookings(ownerBookings);
+      const requests = await getOwnerPayoutRequests(user.uid);
+      setPayoutRequests(requests);
+    } catch (err) {
+      console.warn('Error loading wallet data:', err);
     } finally {
-      setSaving(false);
+      setLoadingWallet(false);
     }
   };
+
+  const isCashMethod = (method?: string, mode?: string) =>
+    method === 'CASH' ||
+    method === 'PAY_AT_VENUE' ||
+    method === 'PAY_LATER_AT_TURF' ||
+    method === 'CASH_OR_COUNTER_UPI' ||
+    mode === 'PAY_LATER_AT_TURF';
+
+  // Accurate financial split per booking:
+  // - Online Revenue: Payments routed through central admin gateway escrow (withdrawable by owner)
+  // - Counter Cash: Payments collected directly at turf desk in person (in-hand at venue)
+  const financialTotals = bookings.reduce(
+    (acc, b) => {
+      const split = calculateStandardBookingFinancials(b);
+      return {
+        onlineRevenue: acc.onlineRevenue + split.onlineRevenue,
+        cashRevenue: acc.cashRevenue + split.cashRevenue,
+        pendingDue: acc.pendingDue + split.pendingDue,
+      };
+    },
+    { onlineRevenue: 0, cashRevenue: 0, pendingDue: 0 }
+  );
+
+  const onlineRevenue = financialTotals.onlineRevenue;
+  const cashRevenue = financialTotals.cashRevenue;
+  const totalRevenue = onlineRevenue + cashRevenue;
+
+  const pendingPayouts = payoutRequests
+    .filter((p) => p.status === 'REQUESTED' || p.status === 'PROCESSING')
+    .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+  const settledPayouts = payoutRequests
+    .filter((p) => p.status === 'COMPLETED')
+    .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+  const availableOnlineBalance = Math.max(0, onlineRevenue - pendingPayouts - settledPayouts);
+
+  const [togglingTurfId, setTogglingTurfId] = useState<string | null>(null);
+
+  const handleToggleTurfPayAtVenue = async (turf: Turf) => {
+    if (planFeatures.allowPayAtVenue === false) {
+      showToast('Pay at Venue (Counter Cash) is disabled on your current subscription plan. Upgrade your plan to enable cash payments.', 'error');
+      return;
+    }
+    const currentAllowed = turf.allowPayAtVenue !== false && turf.allowPayLater !== false;
+    const nextAllowed = !currentAllowed;
+    try {
+      setTogglingTurfId(turf.id);
+      await updateTurf(turf.id, {
+        allowPayAtVenue: nextAllowed,
+        allowPayLater: nextAllowed,
+      });
+      showToast(
+        nextAllowed
+          ? `Pay at Venue turned ON for "${turf.name}". Players can choose to pay cash at counter.`
+          : `Pay at Venue turned OFF for "${turf.name}". 100% online advance payment is now required.`
+      );
+      if (onTurfsUpdated) onTurfsUpdated();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update payment option.', 'error');
+    } finally {
+      setTogglingTurfId(null);
+    }
+  };
+
+  const handleSavePayoutPreferences = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !user.uid) return;
+
+    setSavingPayoutPref(true);
+    try {
+      await updateUserProfile({
+        paymentSettings: {
+          ...(profile?.paymentSettings || {}),
+          upiId: payoutUpi.trim() || undefined,
+          bankName: payoutBankName.trim() || undefined,
+          accountNumber: payoutAccountNumber.trim() || undefined,
+          ifscCode: payoutIfscCode.trim().toUpperCase() || undefined,
+          beneficiaryName: payoutBeneficiary.trim() || undefined,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      showToast('Admin payout settlement details saved successfully!');
+    } catch (err: any) {
+      showToast(err.message || 'Failed to save settlement preferences', 'error');
+    } finally {
+      setSavingPayoutPref(false);
+    }
+  };
+
+  const handleCancelRequest = async (requestId: string) => {
+    if (!user?.uid) return;
+    try {
+      setCancellingRequestId(requestId);
+      await cancelOwnerPayoutRequest(requestId, user.uid);
+      showToast('Withdrawal request cancelled successfully. Funds restored to available balance.');
+      setSelectedReceiptRequest(null);
+      loadWalletData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to cancel withdrawal request.', 'error');
+    } finally {
+      setCancellingRequestId(null);
+    }
+  };
+
+  const handleClearTestData = async () => {
+    if (!user?.uid) return;
+    try {
+      await deleteOwnerTestData(user.uid);
+      showToast('Test data cleared successfully.');
+      loadWalletData();
+    } catch (err) {
+      showToast('Failed to clear test data.', 'error');
+    }
+  };
+
+  const filteredPayoutRequests = payoutRequests.filter((req) => {
+    if (historyFilter === 'ALL') return true;
+    if (historyFilter === 'REQUESTED') return req.status === 'REQUESTED' || req.status === 'PROCESSING';
+    if (historyFilter === 'COMPLETED') return req.status === 'COMPLETED';
+    if (historyFilter === 'REJECTED') return req.status === 'REJECTED' || req.status === 'CANCELLED';
+    return true;
+  });
 
   return (
     <div className="space-y-6">
-      {/* Header Banner */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-indigo-500/30 rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+      {/* Central Escrow Policy Banner */}
+      <div className="bg-gradient-to-r from-slate-900 via-emerald-950/30 to-slate-900 border border-emerald-500/30 rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
+        <div className="absolute top-0 right-0 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
 
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="space-y-2">
             <div className="flex items-center gap-2.5">
-              <div className="w-10 h-10 rounded-2xl bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
-                <QrCode className="w-5 h-5" />
+              <div className="w-10 h-10 rounded-2xl bg-emerald-600/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                <ShieldCheck className="w-5 h-5" />
               </div>
               <div>
-                <span className="text-[10px] font-extrabold uppercase tracking-widest text-indigo-400">
-                  Payouts & Direct Settlements
+                <span className="text-[10px] font-extrabold uppercase tracking-widest text-emerald-400">
+                  Central Escrow & Admin Settlement
                 </span>
                 <h2 className="text-xl sm:text-2xl font-black text-white">
-                  Owner Payment ID & Payout Accounts
+                  Owner Earnings & Payout Wallet
                 </h2>
               </div>
             </div>
-            <p className="text-xs text-slate-300 max-w-2xl">
-              Add your <strong className="text-white">UPI ID (VPA)</strong>,{' '}
-              <strong className="text-white">Razorpay Merchant ID</strong>, or{' '}
-              <strong className="text-white">Bank Account</strong> to receive instant payments
-              directly when athletes book slots and join lobbies at your turf.
+            <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
+              All athlete payments for online slot bookings and lobby matches are securely processed through the <strong className="text-white">Central TruFit Admin Gateway</strong>.
+              Your earnings accumulate in your wallet and are disbursed directly to your bank account or UPI ID by TruFit Admin.
             </p>
           </div>
 
           {/* Quick Status Pill */}
-          <div className="flex items-center gap-3 bg-slate-950/80 border border-slate-800 p-3 rounded-2xl">
-            <div
-              className={`w-3 h-3 rounded-full ${
-                isValidUpi ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
-              }`}
-            />
+          <div className="flex items-center gap-3 bg-slate-950/90 border border-emerald-500/30 p-3.5 rounded-2xl">
+            <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
             <div>
               <span className="text-[10px] uppercase font-bold text-slate-400 block">
-                Payment Channel
+                Platform Escrow
               </span>
-              <span className="text-xs font-bold text-white">
-                {isValidUpi ? 'Active (Direct UPI Ready)' : 'Pending Setup'}
+              <span className="text-xs font-bold text-emerald-400">
+                Central Admin Gateway Active
               </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Target Venue Selector (All vs Specific Turf) */}
-      {turfs.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Building2 className="w-4 h-4 text-indigo-400" />
-            <span className="text-xs font-bold text-white">Apply Payment ID To:</span>
+      {/* Revenue Breakdown [Online | Cash] & Withdraw Card */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <DollarSign className="w-5 h-5 text-emerald-400" />
+              <span>Revenue Transparency & Withdrawal Balance</span>
+            </h3>
+            <p className="text-xs text-slate-400">
+              Clear segregation between in-person desk cash and online gateway earnings held in platform escrow.
+            </p>
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => handleTurfSelect('ALL')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                selectedTurfId === 'ALL'
-                  ? 'bg-indigo-600 text-white shadow-md'
-                  : 'bg-slate-950 text-slate-400 border border-slate-800 hover:border-slate-700'
-              }`}
-            >
-              All My Venues ({turfs.length})
-            </button>
-            {turfs.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => handleTurfSelect(t.id)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  selectedTurfId === t.id
-                    ? 'bg-indigo-600 text-white shadow-md'
-                    : 'bg-slate-950 text-slate-400 border border-slate-800 hover:border-slate-700'
-                }`}
-              >
-                {t.name}
-              </button>
-            ))}
+          <button
+            type="button"
+            onClick={() => setShowWithdrawModal(true)}
+            disabled={availableOnlineBalance <= 0}
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black px-6 py-3 rounded-2xl text-xs uppercase tracking-wider flex items-center gap-2 transition-all shadow-lg shadow-emerald-950/50 cursor-pointer self-start sm:self-auto"
+          >
+            <ArrowDownToLine className="w-4 h-4" />
+            <span>Initiate Formal Withdrawal (₹{availableOnlineBalance.toLocaleString('en-IN')})</span>
+          </button>
+        </div>
+
+        {/* 4-Stat Mathematical Financial Ledger Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* 1. Net Available Balance */}
+          <div className="bg-gradient-to-br from-emerald-950/60 via-slate-950 to-slate-950 border border-emerald-500/40 p-5 rounded-2xl relative overflow-hidden shadow-lg">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400">
+                Available to Withdraw
+              </span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            </div>
+            <p className="text-2xl sm:text-3xl font-black text-emerald-400 mt-2 font-mono">
+              ₹{availableOnlineBalance.toLocaleString('en-IN')}
+            </p>
+            <span className="text-[11px] text-emerald-300/80 mt-1 block">
+              Ready for immediate payout
+            </span>
+          </div>
+
+          {/* 2. Total Online Gross */}
+          <div className="bg-slate-950 border border-slate-800 p-5 rounded-2xl">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              Total Online Gateway Gross
+            </span>
+            <p className="text-2xl font-black text-white mt-2 font-mono">
+              ₹{onlineRevenue.toLocaleString('en-IN')}
+            </p>
+            <span className="text-[11px] text-slate-400 mt-1 block">
+              Disbursed: ₹{settledPayouts.toLocaleString('en-IN')} | In-Review: ₹{pendingPayouts.toLocaleString('en-IN')}
+            </span>
+          </div>
+
+          {/* 3. In-Person Desk Cash */}
+          <div className="bg-slate-950 border border-amber-950/60 p-5 rounded-2xl relative overflow-hidden">
+            <div className="absolute right-3 top-3 text-[9px] bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded-full border border-amber-500/30">
+              In-Hand at Venue
+            </div>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+              Direct Counter Cash
+            </span>
+            <p className="text-2xl font-black text-amber-400 mt-2 font-mono">
+              ₹{cashRevenue.toLocaleString('en-IN')}
+            </p>
+            <span className="text-[11px] text-slate-400 mt-1 block">
+              Kept directly by owner (0% escrow)
+            </span>
+          </div>
+
+          {/* 4. Combined Total Revenue */}
+          <div className="bg-slate-950 border border-slate-800 p-5 rounded-2xl">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              Total Combined Turnover
+            </span>
+            <p className="text-2xl font-black text-white mt-2 font-mono">
+              ₹{totalRevenue.toLocaleString('en-IN')}
+            </p>
+            <span className="text-[11px] text-slate-400 mt-1 block">
+              All {turfs.length} arenas combined
+            </span>
           </div>
         </div>
-      )}
+      </div>
 
-      {/* Main Grid: Settings Form & Live Preview */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Form Controls (7 Cols) */}
-        <form
-          onSubmit={handleSaveSettings}
-          className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-7 shadow-xl space-y-6"
-        >
-          {/* Section 1: Direct UPI ID (Primary) */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                <Smartphone className="w-4 h-4" />
-                <span>1. Primary UPI ID / VPA (Instant Settlement)</span>
-              </label>
-              {isValidUpi && (
-                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full font-bold border border-emerald-500/30 flex items-center gap-1">
-                  <CheckCircle2 className="w-3 h-3" /> Valid VPA
-                </span>
-              )}
-            </div>
-
-            <p className="text-xs text-slate-400">
-              Athletes can pay via Google Pay, PhonePe, Paytm, BHIM, or any UPI app. Funds are
-              credited directly to this VPA.
+      {/* Venue Payment Options: Pay at Venue / Cash Acceptance Controls */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Banknote className="w-5 h-5 text-emerald-400" />
+              <span>Venue Payment Acceptance: Pay at Venue (Counter Cash)</span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Turn <strong className="text-white">Pay at Venue ON</strong> to let athletes pay in cash at the counter, or turn <strong className="text-white">OFF</strong> to mandate 100% online advance prepaid bookings.
             </p>
+          </div>
+        </div>
 
-            <div className="relative">
+        {planFeatures.allowPayAtVenue === false && (
+          <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center gap-3 text-xs text-amber-300">
+            <Lock className="w-5 h-5 text-amber-400 shrink-0" />
+            <span><strong>Pay at Venue Feature Locked:</strong> Counter cash payments are disabled in your current subscription plan. All player bookings enforce 100% online advance payment.</span>
+          </div>
+        )}
+
+        {turfs.length === 0 ? (
+          <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800 text-xs text-slate-400 text-center">
+            No venues registered yet. Add a turf to manage its payment acceptance policies.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {turfs.map((turf) => {
+              const isAllowed = turf.allowPayAtVenue !== false && turf.allowPayLater !== false;
+              const isUpdating = togglingTurfId === turf.id;
+
+              return (
+                <div
+                  key={turf.id}
+                  className={`p-4 sm:p-5 rounded-2xl border transition-all flex flex-col justify-between gap-3.5 ${
+                    isAllowed
+                      ? 'bg-slate-950 border-emerald-500/30'
+                      : 'bg-slate-950 border-slate-800'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
+                        <h4 className="text-sm font-bold text-white">{turf.name}</h4>
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        {turf.area ? `${turf.area}, ${turf.city}` : turf.city} • ₹{turf.basePrice}/hr
+                      </p>
+                    </div>
+
+                    <span
+                      className={`text-[10px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider ${
+                        isAllowed
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                          : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                      }`}
+                    >
+                      {isAllowed ? 'Pay at Venue ON' : 'Online Only (OFF)'}
+                    </span>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-3">
+                    <span className="text-xs text-slate-400">
+                      {isAllowed
+                        ? 'Athletes can choose "Pay at Turf" at checkout'
+                        : 'Athletes must pay online via UPI/Card in advance'}
+                    </span>
+
+                    <button
+                      type="button"
+                      disabled={isUpdating}
+                      onClick={() => handleToggleTurfPayAtVenue(turf)}
+                      className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md shrink-0 ${
+                        isAllowed
+                          ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+                          : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/40'
+                      }`}
+                    >
+                      {isUpdating ? (
+                        <span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                      ) : isAllowed ? (
+                        <>
+                          <ToggleRight className="w-4 h-4 text-emerald-400" />
+                          <span>Turn OFF</span>
+                        </>
+                      ) : (
+                        <>
+                          <ToggleLeft className="w-4 h-4 text-slate-400" />
+                          <span>Turn ON</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Payout Destination Account for Admin Settlements */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <form
+          onSubmit={handleSavePayoutPreferences}
+          className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-7 shadow-xl space-y-5"
+        >
+          <div className="space-y-1">
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Landmark className="w-5 h-5 text-indigo-400" />
+              <span>Admin Settlement Receiving Details</span>
+            </h3>
+            <p className="text-xs text-slate-400">
+              Provide your Bank Account or UPI ID where TruFit Admin should deposit your online earning withdrawals.
+            </p>
+          </div>
+
+          <div className="space-y-4 pt-2">
+            <div>
+              <label className="text-xs font-semibold text-slate-300 block mb-1">
+                Account Holder / Beneficiary Name
+              </label>
               <input
                 type="text"
-                value={upiId}
-                onChange={(e) => setUpiId(e.target.value.toLowerCase().trim())}
-                placeholder="e.g. yourbusiness@okhdfcbank or 9876543210@paytm"
-                className={`w-full bg-slate-950 border ${
-                  isValidUpi ? 'border-indigo-500/80 ring-1 ring-indigo-500/30' : 'border-slate-700'
-                } rounded-2xl px-4 py-3 text-sm text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-indigo-500`}
+                value={payoutBeneficiary}
+                onChange={(e) => setPayoutBeneficiary(e.target.value)}
+                placeholder="e.g. Apex Sports Management LLP"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
               />
-              {upiId && (
-                <button
-                  type="button"
-                  onClick={handleCopyUpi}
-                  className="absolute right-3 top-3 text-slate-400 hover:text-white p-1 text-xs bg-slate-800/80 rounded-lg"
-                >
-                  {copiedUpi ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                </button>
-              )}
             </div>
 
-            {/* Quick Suffix Chips */}
-            <div className="flex flex-wrap items-center gap-1.5 pt-1">
-              <span className="text-[11px] text-slate-500 mr-1">Quick Suffix:</span>
-              {['@okhdfcbank', '@okaxis', '@okicici', '@paytm', '@ybl', '@upi', '@ibl'].map(
-                (suffix) => (
-                  <button
-                    key={suffix}
-                    type="button"
-                    onClick={() => {
-                      const prefix = upiId.includes('@') ? upiId.split('@')[0] : upiId || 'turf';
-                      setUpiId(`${prefix}${suffix}`);
-                    }}
-                    className="bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-indigo-300 text-[10px] font-mono px-2 py-1 rounded-lg border border-slate-800 transition-colors"
-                  >
-                    {suffix}
-                  </button>
-                )
-              )}
-            </div>
-          </div>
-
-          {/* Section 2: Beneficiary / Brand Name */}
-          <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-              <Building2 className="w-3.5 h-3.5 text-indigo-400" />
-              <span>2. Beneficiary / Business Account Name</span>
-            </label>
-            <input
-              type="text"
-              value={beneficiaryName}
-              onChange={(e) => setBeneficiaryName(e.target.value)}
-              placeholder="e.g. Apex Sports Arena LLP"
-              className="w-full bg-slate-950 border border-slate-700 rounded-2xl px-4 py-2.5 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
-            />
-            <p className="text-[11px] text-slate-500">
-              This name is shown to players in the payment confirmation and bank receipt.
-            </p>
-          </div>
-
-          {/* Section 3: Razorpay Account / Merchant ID (Optional Gateway) */}
-          <div className="bg-slate-950/60 border border-slate-800/80 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                <CreditCard className="w-4 h-4" />
-                <span>3. Razorpay Account / Merchant Key (Optional Gateway)</span>
+            <div>
+              <label className="text-xs font-semibold text-slate-300 block mb-1">
+                Payout UPI ID / VPA (For Instant Settlement)
               </label>
-              <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded font-semibold">
-                Cards / Netbanking / UPI
-              </span>
+              <input
+                type="text"
+                value={payoutUpi}
+                onChange={(e) => setPayoutUpi(e.target.value.toLowerCase().trim())}
+                placeholder="e.g. owner@okaxis or 9876543210@paytm"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+              />
             </div>
-
-            <p className="text-xs text-slate-400">
-              If you have a Razorpay merchant account, you can route card/netbanking payments directly
-              to your account.
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="text-[11px] font-semibold text-slate-400 block mb-1">
-                  Razorpay Key ID (rzp_live / rzp_test)
-                </label>
-                <input
-                  type="text"
-                  value={razorpayKeyId}
-                  onChange={(e) => setRazorpayKeyId(e.target.value.trim())}
-                  placeholder="rzp_live_..."
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-slate-400 block mb-1">
-                  Razorpay Linked Account ID (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={razorpayAccountId}
-                  onChange={(e) => setRazorpayAccountId(e.target.value.trim())}
-                  placeholder="acc_..."
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Section 4: Bank Account Details for NEFT / IMPS Settlements */}
-          <div className="bg-slate-950/60 border border-slate-800/80 rounded-2xl p-4 space-y-3">
-            <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-              <Landmark className="w-4 h-4 text-indigo-400" />
-              <span>4. Bank Account for Direct Payouts (Optional)</span>
-            </label>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="text-[11px] font-semibold text-slate-400 block mb-1">Bank Name</label>
                 <input
                   type="text"
-                  value={bankName}
-                  onChange={(e) => setBankName(e.target.value)}
+                  value={payoutBankName}
+                  onChange={(e) => setPayoutBankName(e.target.value)}
                   placeholder="e.g. HDFC Bank"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
                 />
               </div>
               <div>
@@ -456,225 +515,226 @@ export const OwnerPaymentSettingsTab: React.FC<OwnerPaymentSettingsTabProps> = (
                   Account Number
                 </label>
                 <input
-                  type="password"
-                  value={accountNumber}
-                  onChange={(e) => setAccountNumber(e.target.value.trim())}
-                  placeholder="••••••••••••"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                  type="text"
+                  value={payoutAccountNumber}
+                  onChange={(e) => setPayoutAccountNumber(e.target.value.trim())}
+                  placeholder="50100234567890"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
                 />
               </div>
               <div>
                 <label className="text-[11px] font-semibold text-slate-400 block mb-1">IFSC Code</label>
                 <input
                   type="text"
-                  value={ifscCode}
-                  onChange={(e) => setIfscCode(e.target.value.toUpperCase().trim())}
+                  value={payoutIfscCode}
+                  onChange={(e) => setPayoutIfscCode(e.target.value.toUpperCase().trim())}
                   placeholder="HDFC0001234"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs uppercase font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs uppercase font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
                 />
               </div>
-            </div>
-          </div>
-
-          {/* Section 5: Custom Standee QR Upload */}
-          <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-              <QrCode className="w-4 h-4 text-indigo-400" />
-              <span>5. Custom Printed QR Standee Image (Optional)</span>
-            </label>
-            <p className="text-[11px] text-slate-400">
-              Upload an image of your turf counter's official QR standee (GPay / PhonePe / Paytm). If
-              left blank, a dynamic high-resolution QR code is generated automatically from your UPI
-              ID.
-            </p>
-            <div className="flex items-center gap-3">
-              <label className="bg-slate-950 hover:bg-slate-800 border border-slate-700 hover:border-slate-600 text-slate-300 text-xs font-bold px-4 py-2.5 rounded-xl cursor-pointer flex items-center gap-2 transition-colors">
-                <Upload className="w-4 h-4 text-indigo-400" />
-                <span>Upload QR Standee</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleQrUpload}
-                  className="hidden"
-                />
-              </label>
-              {qrCodeUrl && (
-                <button
-                  type="button"
-                  onClick={() => setQrCodeUrl('')}
-                  className="text-rose-400 hover:text-rose-300 text-xs font-semibold"
-                >
-                  Remove Custom QR
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Section 6: Accepted Methods & Note */}
-          <div className="space-y-3 pt-2 border-t border-slate-800">
-            <label className="text-xs font-bold uppercase tracking-wider text-slate-400 block">
-              6. Accepted Payment Channels
-            </label>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <label className="flex items-center gap-2.5 bg-slate-950 p-3 rounded-xl border border-slate-800 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={allowDirectUpi}
-                  onChange={(e) => setAllowDirectUpi(e.target.checked)}
-                  className="rounded text-indigo-600 focus:ring-indigo-500"
-                />
-                <span className="text-xs text-white font-medium">Direct UPI & QR</span>
-              </label>
-
-              <label className="flex items-center gap-2.5 bg-slate-950 p-3 rounded-xl border border-slate-800 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={allowOnlineRazorpay}
-                  onChange={(e) => setAllowOnlineRazorpay(e.target.checked)}
-                  className="rounded text-indigo-600 focus:ring-indigo-500"
-                />
-                <span className="text-xs text-white font-medium">Razorpay Gateway</span>
-              </label>
-
-              <label className="flex items-center gap-2.5 bg-slate-950 p-3 rounded-xl border border-slate-800 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={allowPayAtVenue}
-                  onChange={(e) => setAllowPayAtVenue(e.target.checked)}
-                  className="rounded text-indigo-600 focus:ring-indigo-500"
-                />
-                <span className="text-xs text-white font-medium">Pay at Counter (Cash)</span>
-              </label>
-            </div>
-
-            <div>
-              <label className="text-[11px] font-semibold text-slate-400 block mb-1">
-                Custom Payment Remarks for Players
-              </label>
-              <textarea
-                rows={2}
-                value={paymentInstructions}
-                onChange={(e) => setPaymentInstructions(e.target.value)}
-                placeholder="Instructions shown to players on the payment confirmation screen..."
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
-              />
             </div>
           </div>
 
           <button
             type="submit"
-            disabled={saving}
-            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold py-3.5 rounded-2xl transition-all shadow-lg shadow-indigo-950/60 cursor-pointer flex items-center justify-center gap-2 text-xs uppercase tracking-wider"
+            disabled={savingPayoutPref}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-indigo-950/50 cursor-pointer flex items-center justify-center gap-2 text-xs uppercase tracking-wider"
           >
-            {saving ? (
+            {savingPayoutPref ? (
               <>
-                <span className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                <span>Saving Payment ID...</span>
+                <span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                <span>Saving Details...</span>
               </>
             ) : (
               <>
                 <Save className="w-4 h-4" />
-                <span>Save Payment ID & Payout Accounts</span>
+                <span>Save Settlement Details</span>
               </>
             )}
           </button>
         </form>
 
-        {/* Right Column: Live Player Checkout Preview Card (5 Cols) */}
-        <div className="lg:col-span-5 space-y-4">
-          <div className="bg-slate-900 border border-indigo-500/30 rounded-3xl p-6 shadow-2xl relative overflow-hidden">
-            <div className="flex items-center justify-between mb-4">
-              <span className="text-[11px] font-extrabold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                <Eye className="w-3.5 h-3.5" />
-                <span>Live Athlete Checkout Preview</span>
-              </span>
-              <span className="text-[10px] bg-indigo-500/20 text-indigo-300 font-bold px-2 py-0.5 rounded-full border border-indigo-500/30">
-                Player View
-              </span>
-            </div>
-
-            <p className="text-xs text-slate-400 mb-4">
-              This is the exact payment screen athletes will see when booking a slot or joining a
-              match at your venue.
-            </p>
-
-            {/* Simulated Checkout Box */}
-            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 text-center space-y-4">
-              <div>
-                <span className="text-[10px] uppercase font-bold text-slate-500 block">Pay Directly To</span>
-                <h4 className="text-base font-extrabold text-white">
-                  {beneficiaryName || 'Apex Sports Arena'}
-                </h4>
-                <p className="text-xs text-indigo-400 font-mono font-bold mt-0.5">
-                  {upiId || 'owner@okhdfcbank'}
+        {/* Right Info Box */}
+        <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-xl space-y-4 flex flex-col justify-between">
+          <div className="space-y-3">
+            <h4 className="text-sm font-bold text-white flex items-center gap-2">
+              <Info className="w-4 h-4 text-emerald-400" />
+              <span>How TruFit Payments Work</span>
+            </h4>
+            <div className="space-y-2.5 text-xs text-slate-300 leading-relaxed">
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                <span className="font-bold text-white block mb-0.5">1. Central Athlete Checkout</span>
+                <p className="text-slate-400 text-[11px]">
+                  When athletes book slots or join lobbies, payments route through the Master Admin Payment Gateway.
                 </p>
               </div>
-
-              {/* QR Code Container */}
-              <div className="bg-white p-4 rounded-2xl inline-block shadow-lg mx-auto max-w-[200px]">
-                {qrCodeUrl ? (
-                  <img
-                    src={qrCodeUrl}
-                    alt="Custom QR Standee"
-                    className="w-40 h-40 object-contain rounded-lg mx-auto"
-                  />
-                ) : (
-                  <img
-                    src={qrApiUrl}
-                    alt="UPI QR Code"
-                    className="w-40 h-40 object-contain rounded-lg mx-auto"
-                  />
-                )}
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                <span className="font-bold text-white block mb-0.5">2. Guaranteed Online Balance</span>
+                <p className="text-slate-400 text-[11px]">
+                  Funds are credited to your owner wallet immediately upon completed booking.
+                </p>
               </div>
-
-              <div className="space-y-1.5 text-xs text-slate-400">
-                <div className="flex items-center justify-center gap-1.5 text-slate-300 font-medium">
-                  <span>Scan with GPay, PhonePe, Paytm, or BHIM</span>
-                </div>
-                <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-xl text-[11px] text-slate-300 text-left flex items-start gap-2">
-                  <Info className="w-3.5 h-3.5 text-indigo-400 flex-shrink-0 mt-0.5" />
-                  <span>{paymentInstructions}</span>
-                </div>
-              </div>
-
-              {/* Action Simulation Button */}
-              <button
-                type="button"
-                onClick={handleCopyUpi}
-                className="w-full bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-bold py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                {copiedUpi ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Copied {upiId || 'UPI ID'}</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy UPI ID for Instant Transfer</span>
-                  </>
-                )}
-              </button>
-            </div>
-
-            {/* Zero Platform Fee Badge */}
-            <div className="mt-4 bg-emerald-950/40 border border-emerald-500/30 rounded-2xl p-3.5 flex items-center gap-3">
-              <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold flex-shrink-0">
-                ⚡
-              </div>
-              <div className="text-left">
-                <span className="text-xs font-bold text-emerald-300 block">
-                  0% Commission Direct UPI Payouts
-                </span>
-                <span className="text-[11px] text-slate-400">
-                  Direct UPI transfers go 100% directly into your bank without payment gateway fees.
-                </span>
+              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                <span className="font-bold text-white block mb-0.5">3. 24-48hr Admin Settlement</span>
+                <p className="text-slate-400 text-[11px]">
+                  Withdrawal requests are processed and settled directly to your registered bank or UPI ID with UTR confirmation.
+                </p>
               </div>
             </div>
           </div>
+
+          <div className="p-3 bg-indigo-950/40 border border-indigo-500/30 rounded-xl flex items-center gap-2 text-xs text-indigo-300">
+            <CheckCircle2 className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+            <span>Zero payment gateway setup or maintenance required by turf owners.</span>
+          </div>
         </div>
       </div>
+
+      {/* Payout History & Formal Requests List */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+          <div>
+            <h4 className="text-sm font-bold text-white flex items-center gap-2">
+              <Receipt className="w-4 h-4 text-indigo-400" />
+              <span>Withdrawal & Payout History</span>
+            </h4>
+            <p className="text-xs text-slate-400">
+              Audit log of all initiated withdrawal requests, bank UTR clearance, and statement receipts.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            {/* Filter Tabs */}
+            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+              {(['ALL', 'REQUESTED', 'COMPLETED', 'REJECTED'] as const).map((filterKey) => (
+                <button
+                  key={filterKey}
+                  type="button"
+                  onClick={() => setHistoryFilter(filterKey)}
+                  className={`px-3 py-1 rounded-lg font-bold text-[11px] transition-all cursor-pointer ${
+                    historyFilter === filterKey
+                      ? 'bg-indigo-600 text-white shadow-md'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {filterKey === 'ALL' ? 'All' : filterKey === 'REQUESTED' ? 'In Review' : filterKey === 'COMPLETED' ? 'Settled' : 'Rejected'}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleClearTestData}
+              className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Clean Test</span>
+            </button>
+          </div>
+        </div>
+
+        {filteredPayoutRequests.length === 0 ? (
+          <div className="bg-slate-950 border border-slate-800 rounded-2xl p-8 text-center text-slate-400 text-xs space-y-2">
+            <Receipt className="w-8 h-8 text-slate-600 mx-auto" />
+            <p>No withdrawal requests match the selected filter.</p>
+            {payoutRequests.length === 0 && (
+              <p className="text-slate-500 text-[11px]">
+                Click <strong className="text-emerald-400">Initiate Formal Withdrawal</strong> above to disburse your online earnings.
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {filteredPayoutRequests.map((req) => (
+              <div
+                key={req.id}
+                onClick={() => setSelectedReceiptRequest(req)}
+                className="bg-slate-950 hover:bg-slate-900/80 border border-slate-800 hover:border-slate-700 p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all cursor-pointer group"
+              >
+                <div className="space-y-1.5 flex-1">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-base font-black text-white font-mono">
+                      ₹{req.amount?.toLocaleString('en-IN')}
+                    </span>
+                    <span
+                      className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
+                        req.status === 'COMPLETED'
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                          : req.status === 'REQUESTED' || req.status === 'PROCESSING'
+                          ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                          : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                      }`}
+                    >
+                      {req.status === 'REQUESTED' ? 'UNDER ADMIN REVIEW' : req.status}
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-slate-400 font-mono break-all line-clamp-1">
+                    Destination: {req.destination}
+                  </p>
+
+                  <div className="flex items-center gap-3 text-[11px] text-slate-500">
+                    <span>
+                      Requested: {new Date(req.date || Date.now()).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
+                    </span>
+                    {req.processedAt && (
+                      <span className="text-emerald-400">
+                        • Settled: {new Date(req.processedAt).toLocaleDateString('en-IN')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 self-end sm:self-center">
+                  {req.utr && req.utr !== 'Pending Admin Settlement' && (
+                    <div className="text-xs font-mono text-indigo-400 bg-indigo-950/40 border border-indigo-500/30 px-3 py-1.5 rounded-xl">
+                      UTR: {req.utr}
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    className="p-2 rounded-xl bg-slate-900 group-hover:bg-slate-800 text-slate-400 group-hover:text-white transition-colors"
+                  >
+                    <Eye className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Dedicated Formal Withdrawal Request Modal */}
+      <OwnerWithdrawalModal
+        isOpen={showWithdrawModal}
+        onClose={() => setShowWithdrawModal(false)}
+        onSuccess={() => {
+          loadWalletData();
+          showToast('Withdrawal request submitted successfully! TruFit Admin will process settlement.');
+        }}
+        ownerId={user?.uid || ''}
+        ownerName={profile?.displayName || profile?.businessName || user?.displayName || user?.email || 'Turf Owner'}
+        turfs={turfs}
+        availableOnlineBalance={availableOnlineBalance}
+        onlineRevenue={onlineRevenue}
+        cashRevenue={cashRevenue}
+        pendingPayouts={pendingPayouts}
+        settledPayouts={settledPayouts}
+        savedUpi={payoutUpi}
+        savedBankName={payoutBankName}
+        savedAccountNumber={payoutAccountNumber}
+        savedIfscCode={payoutIfscCode}
+        savedBeneficiary={payoutBeneficiary}
+      />
+
+      {/* Formal Payout Statement / Receipt Modal */}
+      <OwnerPayoutReceiptModal
+        request={selectedReceiptRequest}
+        onClose={() => setSelectedReceiptRequest(null)}
+        onCancelRequest={handleCancelRequest}
+        isCancelling={Boolean(cancellingRequestId)}
+      />
     </div>
   );
 };

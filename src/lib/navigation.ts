@@ -27,7 +27,12 @@ export function openDirectionsInMaps(turf: {
   city?: string;
   latitude?: number;
   longitude?: number;
+  locationUrl?: string;
 }) {
+  if (turf.locationUrl && (turf.locationUrl.startsWith('http://') || turf.locationUrl.startsWith('https://'))) {
+    window.open(turf.locationUrl, '_blank');
+    return;
+  }
   if (turf.latitude && turf.longitude) {
     openTurfDirections(turf.latitude, turf.longitude, turf.name);
   } else {

@@ -16,7 +16,7 @@ import { db } from '../../lib/firebase';
 import { Lobby, LobbyPlayer, UserProfile } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { openRazorpayCheckout } from '../../lib/razorpay';
-import { cleanupExpiredLobbies, cancelBookingAndDissolveLobby } from '../../lib/db';
+import { cleanupExpiredLobbies, cancelBookingAndDissolveLobby, getLobbyGameStatus, isLobbyConcluded } from '../../lib/db';
 import {
   Activity,
   Calendar,
@@ -44,28 +44,36 @@ import {
   CreditCard,
   Building,
   CheckCircle2,
+  MessageSquare,
+  Star,
 } from 'lucide-react';
 import { CreateLobbyModal } from './CreateLobbyModal';
 import { InvitePlayerModal } from './InvitePlayerModal';
 import { PublicProfileModal } from './PublicProfileModal';
+import { LobbyChatModal } from './LobbyChatModal';
+import { RatePlayerModal } from './RatePlayerModal';
+import { PoolsTab } from './PoolsTab';
 
 interface LobbiesTabProps {
   onHostMatchFromLobby?: (lobby: Lobby) => void;
   showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
+  selectedCity?: string;
 }
 
 export const LobbiesTab: React.FC<LobbiesTabProps> = ({
   onHostMatchFromLobby,
   showToast,
+  selectedCity,
 }) => {
   const { user, profile } = useAuth();
 
   const [lobbies, setLobbies] = useState<Lobby[]>([]);
   const [loading, setLoading] = useState(true);
+  const [subTab, setSubTab] = useState<'LOBBIES' | 'POOLS'>('LOBBIES');
 
   // Filter & Search states
   const [selectedSport, setSelectedSport] = useState<string>('All');
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'OPEN' | 'MY_LOBBIES'>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'OPEN' | 'MY_LOBBIES' | 'PAST'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Selected Lobby for Detail view
@@ -87,10 +95,30 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteTargetLobby, setInviteTargetLobby] = useState<Lobby | null>(null);
   const [viewingPlayer, setViewingPlayer] = useState<UserProfile | null>(null);
+  const [chatLobby, setChatLobby] = useState<Lobby | null>(null);
+  const [rateTarget, setRateTarget] = useState<{
+    targetUid: string;
+    targetName: string;
+    targetPhotoURL?: string | null;
+    sport?: string;
+  } | null>(null);
 
-  // Run auto-cleanup for expired lobbies when component mounts
+  // Run auto-cleanup for expired lobbies when component mounts and periodic refresh
   useEffect(() => {
     cleanupExpiredLobbies().catch((err) => console.warn('Lobby cleanup error:', err));
+    const interval = setInterval(() => {
+      cleanupExpiredLobbies().catch(() => {});
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Periodic ticker to recalculate game status in real time
+  const [, setTimeTick] = useState<number>(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTimeTick(Date.now());
+    }, 30000);
+    return () => clearInterval(timer);
   }, []);
 
   // Real-time listener for lobbies
@@ -239,7 +267,7 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
         try {
           const razorpayRes = await openRazorpayCheckout({
             amount: price,
-            name: 'TruFit Turf Match Share',
+            name: 'TurFit Turf Match Share',
             description: `Match Fee for ${lobby.name} (${lobby.sport})`,
             prefill: {
               name: profile.displayName || user.displayName || 'Athlete',
@@ -415,6 +443,15 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
       return;
     }
 
+    const gameStatus = getLobbyGameStatus(lobby);
+    if (gameStatus === 'LIVE' || gameStatus === 'OVER') {
+      showToast(
+        `Cannot cancel or dissolve lobby because the match is ${gameStatus === 'LIVE' ? 'currently live in progress' : 'concluded'}.`,
+        'error'
+      );
+      return;
+    }
+
     if (
       !confirm(
         `Are you sure you want to cancel the booking and dissolve "${lobby.name}"? The turf slot will be released back for other players.`
@@ -457,6 +494,16 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
   // Host Action: Cancel Lobby
   const handleCancelLobby = async (lobby: Lobby) => {
     if (!user || user.uid !== lobby.hostId) return;
+
+    const gameStatus = getLobbyGameStatus(lobby);
+    if (gameStatus === 'LIVE' || gameStatus === 'OVER') {
+      showToast(
+        `Cannot cancel lobby because the match is ${gameStatus === 'LIVE' ? 'currently live in progress' : 'concluded'}.`,
+        'error'
+      );
+      return;
+    }
+
     if (!window.confirm('Are you sure you want to cancel this lobby? All participants will be notified.')) {
       return;
     }
@@ -497,7 +544,7 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
   // Share lobby
   const handleShareLobby = (lobby: Lobby, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const shareText = `Join my ${lobby.sport} lobby "${lobby.name}" at ${lobby.turfName} on ${lobby.date} (${lobby.startTime} - ${lobby.endTime}) on TruFit!`;
+    const shareText = `Join my ${lobby.sport} lobby "${lobby.name}" at ${lobby.turfName} on ${lobby.date} (${lobby.startTime} - ${lobby.endTime}) on TurFit!`;
     if (navigator.clipboard) {
       navigator.clipboard.writeText(shareText);
       showToast('Lobby invite details copied to clipboard!', 'success');
@@ -507,36 +554,85 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
   };
 
   // View public profile
-  const handleViewPlayerProfile = async (uid: string) => {
+  const handleViewPlayerProfile = async (uid: string, fallbackData?: Partial<UserProfile>) => {
+    if (!uid) return;
     try {
       const snap = await getDoc(doc(db, 'users', uid));
       if (snap.exists()) {
-        setViewingPlayer(snap.data() as UserProfile);
+        setViewingPlayer({ uid: snap.id, ...snap.data() } as UserProfile);
+      } else {
+        setViewingPlayer({
+          uid,
+          email: 'athlete@trufit.app',
+          displayName: fallbackData?.displayName || (fallbackData as any)?.playerName || 'TruFit Member',
+          role: 'PLAYER',
+          emailVerified: false,
+          photoURL: fallbackData?.photoURL || (fallbackData as any)?.playerPhotoURL,
+          preferredSport: fallbackData?.preferredSport,
+          city: fallbackData?.city || 'Local',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          isPublic: true,
+          ...fallbackData,
+        } as UserProfile);
       }
     } catch (err) {
       console.error('Error fetching player profile:', err);
+      setViewingPlayer({
+        uid,
+        email: 'athlete@trufit.app',
+        displayName: fallbackData?.displayName || (fallbackData as any)?.playerName || 'TruFit Member',
+        role: 'PLAYER',
+        emailVerified: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        isPublic: true,
+        ...fallbackData,
+      } as UserProfile);
     }
   };
 
   // Filtered lobbies
   const filteredLobbies = lobbies.filter((l) => {
+    if (selectedCity && selectedCity !== 'ALL') {
+      const lCity = (l.turfCity || '').toLowerCase().trim();
+      if (lCity && lCity !== selectedCity.toLowerCase().trim()) return false;
+    }
+
     // Visibility: public or hosted by current user
     if (!l.isPublic && l.hostId !== user?.uid && !joinedLobbyIds.has(l.id)) {
       return false;
     }
 
+    const isConcluded = isLobbyConcluded(l);
+
     if (selectedSport !== 'All' && l.sport.toLowerCase() !== selectedSport.toLowerCase()) {
       return false;
     }
 
-    if (statusFilter === 'OPEN' && l.status !== 'OPEN') {
-      return false;
+    // USER DIRECTIVE:
+    // When match concluded:
+    // 1. Don't show on active lobbies
+    // 2. Don't show concluded matches in open spots even if there are spots left
+    if (statusFilter === 'OPEN') {
+      if (isConcluded) return false;
+      if (l.status !== 'OPEN' || l.currentPlayers >= l.maxPlayers) return false;
+    }
+
+    if (statusFilter === 'ALL') {
+      // Active lobbies only (never concluded matches)
+      if (isConcluded) return false;
     }
 
     if (statusFilter === 'MY_LOBBIES') {
       if (l.hostId !== user?.uid && !joinedLobbyIds.has(l.id)) {
         return false;
       }
+      if (isConcluded) return false;
+    }
+
+    if (statusFilter === 'PAST') {
+      if (!isConcluded) return false;
     }
 
     if (searchQuery.trim()) {
@@ -550,6 +646,11 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
 
     return true;
   });
+
+  const activeLobbiesCount = lobbies.filter((l) => !isLobbyConcluded(l)).length;
+  const openSpotsCount = lobbies.filter((l) => !isLobbyConcluded(l) && l.status === 'OPEN' && l.currentPlayers < l.maxPlayers).length;
+  const myActiveCount = lobbies.filter((l) => (l.hostId === user?.uid || joinedLobbyIds.has(l.id)) && !isLobbyConcluded(l)).length;
+  const pastMatchesCount = lobbies.filter((l) => isLobbyConcluded(l)).length;
 
   return (
     <div className="space-y-6 animate-fade-in pb-16">
@@ -582,8 +683,40 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
         </button>
       </div>
 
-      {/* Search & Filters */}
-      <div className="space-y-3">
+      {/* Sub-Tab Navigation Switcher */}
+      <div className="flex bg-slate-950 p-1.5 rounded-2xl border border-slate-800/80">
+        <button
+          type="button"
+          onClick={() => setSubTab('LOBBIES')}
+          className={`flex-1 py-3 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            subTab === 'LOBBIES'
+              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900/40'
+          }`}
+        >
+          <Activity className="w-4 h-4" />
+          <span>Live Match Lobbies</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setSubTab('POOLS')}
+          className={`flex-1 py-3 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            subTab === 'POOLS'
+              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/50'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900/40'
+          }`}
+        >
+          <Users className="w-4 h-4" />
+          <span>Matchmaking Pools</span>
+        </button>
+      </div>
+
+      {subTab === 'POOLS' ? (
+        <PoolsTab showToast={showToast} />
+      ) : (
+        <>
+          {/* Search & Filters */}
+          <div className="space-y-3">
         <div className="flex flex-col sm:flex-row gap-3">
           {/* Search bar */}
           <div className="relative flex-1">
@@ -607,7 +740,7 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              All Lobbies
+              Active ({activeLobbiesCount})
             </button>
             <button
               onClick={() => setStatusFilter('OPEN')}
@@ -617,7 +750,7 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              Open Spots
+              Open Spots ({openSpotsCount})
             </button>
             <button
               onClick={() => setStatusFilter('MY_LOBBIES')}
@@ -627,7 +760,17 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              My Lobbies
+              My Squads ({myActiveCount})
+            </button>
+            <button
+              onClick={() => setStatusFilter('PAST')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                statusFilter === 'PAST'
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Past ({pastMatchesCount})
             </button>
           </div>
         </div>
@@ -684,6 +827,9 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
             const isFull = lobby.currentPlayers >= lobby.maxPlayers || lobby.status === 'FULL';
             const spotsRemaining = Math.max(0, lobby.maxPlayers - lobby.currentPlayers);
             const isActionLoading = actionLoadingId === lobby.id;
+            const gameStatus = getLobbyGameStatus(lobby);
+            const isGameLive = gameStatus === 'LIVE' || lobby.status === 'MATCH_STARTED';
+            const isGameOver = gameStatus === 'OVER';
 
             return (
               <div
@@ -704,17 +850,21 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                           <Lock className="w-3 h-3" /> Private
                         </span>
                       )}
-                      {lobby.status === 'OPEN' && !isFull ? (
+                      {isGameLive ? (
+                        <span className="flex items-center gap-1 text-[10px] font-extrabold text-emerald-400 bg-emerald-950/80 border border-emerald-500/50 px-2 py-0.5 rounded-md animate-pulse">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Match Live
+                        </span>
+                      ) : isGameOver ? (
+                        <span className="text-[10px] font-bold text-slate-400 bg-slate-800 border border-slate-700 px-2 py-0.5 rounded-md">
+                          Match Over
+                        </span>
+                      ) : lobby.status === 'OPEN' && !isFull ? (
                         <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-md">
                           Open
                         </span>
                       ) : lobby.status === 'FULL' || isFull ? (
                         <span className="text-[10px] font-bold text-amber-400 bg-amber-950/60 border border-amber-500/30 px-2 py-0.5 rounded-md">
                           Full
-                        </span>
-                      ) : lobby.status === 'MATCH_STARTED' ? (
-                        <span className="text-[10px] font-bold text-indigo-300 bg-indigo-950/60 border border-indigo-500/30 px-2 py-0.5 rounded-md">
-                          Match Live
                         </span>
                       ) : (
                         <span className="text-[10px] font-bold text-slate-400 bg-slate-800 border border-slate-700 px-2 py-0.5 rounded-md">
@@ -734,6 +884,23 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                       {lobby.turfName} • {lobby.turfCity}
                     </span>
                   </div>
+
+                  {/* Host Announcement & Squad Tag */}
+                  {lobby.hostAnnouncement && (
+                    <div className="bg-indigo-950/40 border border-indigo-500/25 rounded-xl p-2.5 mb-3 text-xs text-indigo-200 flex items-start gap-2 shadow-sm">
+                      <span className="text-xs">💬</span>
+                      <p className="line-clamp-2 italic font-medium leading-tight">
+                        "{lobby.hostAnnouncement}"
+                      </p>
+                    </div>
+                  )}
+
+                  {lobby.initialSquadCount && lobby.initialSquadCount > 1 && (
+                    <div className="flex items-center gap-1.5 text-[11px] font-medium text-amber-300 bg-amber-950/40 border border-amber-500/30 px-2.5 py-1 rounded-lg mb-3">
+                      <Users className="w-3.5 h-3.5 text-amber-400" />
+                      <span><strong>{lobby.initialSquadCount} friends</strong> in squad • Looking for {Math.max(0, lobby.maxPlayers - (lobby.currentPlayers || lobby.initialSquadCount))} more</span>
+                    </div>
+                  )}
 
                   {/* Schedule */}
                   <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-3 space-y-1.5 mb-4">
@@ -805,6 +972,18 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                   </button>
 
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      title="Squad Chat"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setChatLobby(lobby);
+                      }}
+                      className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-sky-400 rounded-xl transition-colors cursor-pointer"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                    </button>
+
                     <button
                       type="button"
                       title="Share Lobby"
@@ -944,6 +1123,38 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                 </div>
               </div>
 
+              {/* Host Open Call Announcement */}
+              {selectedLobby.hostAnnouncement && (
+                <div className="bg-indigo-950/50 border border-indigo-500/40 rounded-xl p-3.5 space-y-1 shadow-sm">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-300">
+                    <span>💬 Host Open Call Announcement</span>
+                  </div>
+                  <p className="text-xs text-indigo-100 italic leading-relaxed">
+                    "{selectedLobby.hostAnnouncement}"
+                  </p>
+                </div>
+              )}
+
+              {/* Squad & Cost Division Note */}
+              {(selectedLobby.initialSquadCount || selectedLobby.costDivisionNote) && (
+                <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5" />
+                      Confirmed Squad: {selectedLobby.initialSquadCount || 1} Players
+                    </span>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      {Math.max(0, selectedLobby.maxPlayers - (selectedLobby.currentPlayers || 1))} spots open
+                    </span>
+                  </div>
+                  {selectedLobby.costDivisionNote && (
+                    <p className="text-[11px] text-slate-400 border-t border-slate-800/80 pt-1.5">
+                      💡 {selectedLobby.costDivisionNote}
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Description & Rules */}
               {selectedLobby.description && (
                 <div>
@@ -966,6 +1177,35 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                   </p>
                 </div>
               )}
+
+              {/* Ephemeral Squad Chat Action Banner */}
+              <div
+                onClick={() => setChatLobby(selectedLobby)}
+                className="bg-sky-950/40 hover:bg-sky-900/40 border border-sky-500/30 rounded-xl p-3.5 flex items-center justify-between cursor-pointer transition-colors shadow-sm group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 group-hover:scale-105 transition-transform">
+                    <MessageSquare className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-white">Ephemeral Squad Chat</span>
+                      <span className="text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded border border-sky-500/30 font-semibold">
+                        Live
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Chat with players, coordinate colors, auto-expires 2h post match
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs rounded-lg transition-colors cursor-pointer shadow"
+                >
+                  Open Chat
+                </button>
+              </div>
 
               {/* Player Roster */}
               <div>
@@ -1054,17 +1294,39 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
                             </div>
                           </div>
 
-                          {/* Host can kick non-hosts */}
-                          {user?.uid === selectedLobby.hostId && !isHost && (
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveParticipant(p)}
-                              title="Remove player"
-                              className="text-slate-500 hover:text-rose-400 p-1.5 rounded-lg hover:bg-slate-900 transition-colors cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                          {/* Participant Actions: Rate Player & Kick (Host) */}
+                          <div className="flex items-center gap-1">
+                            {!isMe && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setRateTarget({
+                                    targetUid: p.uid,
+                                    targetName: p.playerName,
+                                    targetPhotoURL: p.photoURL || null,
+                                    sport: selectedLobby.sport,
+                                  })
+                                }
+                                title="Rate Player"
+                                className="text-amber-400 hover:text-amber-300 p-1.5 rounded-lg hover:bg-amber-950/40 border border-transparent hover:border-amber-500/30 transition-colors cursor-pointer flex items-center gap-1 text-[10px] font-bold"
+                              >
+                                <Star className="w-3.5 h-3.5 fill-amber-400/30 text-amber-400" />
+                                <span className="hidden sm:inline">Rate</span>
+                              </button>
+                            )}
+
+                            {/* Host can kick non-hosts */}
+                            {user?.uid === selectedLobby.hostId && !isHost && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveParticipant(p)}
+                                title="Remove player"
+                                className="text-slate-500 hover:text-rose-400 p-1.5 rounded-lg hover:bg-slate-900 transition-colors cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       );
                     })}
@@ -1073,44 +1335,68 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
               </div>
 
               {/* Host Permissions Section */}
-              {user?.uid === selectedLobby.hostId && (
-                <div className="p-4 bg-indigo-950/20 border border-indigo-500/30 rounded-xl space-y-3">
-                  <div className="flex items-center gap-2">
-                    <Shield className="w-4 h-4 text-indigo-400" />
-                    <h4 className="text-xs font-bold text-white">Host Controls</h4>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleToggleLobbyStatus(selectedLobby)}
-                      className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
-                    >
-                      {selectedLobby.status === 'CLOSED' ? 'Reopen Lobby' : 'Close Lobby'}
-                    </button>
-                    {onHostMatchFromLobby && (
+              {user?.uid === selectedLobby.hostId && (() => {
+                const modalGameStatus = getLobbyGameStatus(selectedLobby);
+                const isModalLive = modalGameStatus === 'LIVE';
+                const isModalOver = modalGameStatus === 'OVER';
+
+                return (
+                  <div className="p-4 bg-indigo-950/20 border border-indigo-500/30 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Shield className="w-4 h-4 text-indigo-400" />
+                        <h4 className="text-xs font-bold text-white">Host Controls</h4>
+                      </div>
+                      {isModalLive && (
+                        <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 rounded">
+                          Game Live • Cancellation Disabled
+                        </span>
+                      )}
+                      {isModalOver && (
+                        <span className="text-[10px] font-bold text-slate-400 bg-slate-800 border border-slate-700 px-2 py-0.5 rounded">
+                          Game Concluded • Cancellation Disabled
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <button
                         type="button"
-                        onClick={() => {
-                          onHostMatchFromLobby(selectedLobby);
-                          setSelectedLobby(null);
-                        }}
-                        className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer shadow-md shadow-indigo-950/50"
+                        onClick={() => handleToggleLobbyStatus(selectedLobby)}
+                        className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
                       >
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        <span>Start Match</span>
+                        {selectedLobby.status === 'CLOSED' ? 'Reopen Lobby' : 'Close Lobby'}
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => handleDissolveLobby(selectedLobby)}
-                      className="px-3 py-2 bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Dissolve Lobby</span>
-                    </button>
+                      {onHostMatchFromLobby && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onHostMatchFromLobby(selectedLobby);
+                            setSelectedLobby(null);
+                          }}
+                          className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer shadow-md shadow-indigo-950/50"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>Start Match</span>
+                        </button>
+                      )}
+                      {!isModalLive && !isModalOver ? (
+                        <button
+                          type="button"
+                          onClick={() => handleDissolveLobby(selectedLobby)}
+                          className="px-3 py-2 bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-500/30 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Dissolve Lobby</span>
+                        </button>
+                      ) : (
+                        <div className="px-3 py-2 bg-slate-800/80 text-slate-400 border border-slate-700/60 rounded-xl text-xs font-semibold flex items-center justify-center text-center">
+                          {isModalLive ? 'Match In-Play' : 'Match Concluded'}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
 
             {/* Modal Footer Actions */}
@@ -1321,6 +1607,9 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
         </div>
       )}
 
+        </>
+      )}
+
       {/* Modals */}
       <CreateLobbyModal
         isOpen={showCreateModal}
@@ -1346,6 +1635,27 @@ export const LobbiesTab: React.FC<LobbiesTabProps> = ({
         isOpen={!!viewingPlayer}
         onClose={() => setViewingPlayer(null)}
       />
+
+      <LobbyChatModal
+        isOpen={!!chatLobby}
+        lobby={chatLobby}
+        onClose={() => setChatLobby(null)}
+      />
+
+      {rateTarget && (
+        <RatePlayerModal
+          isOpen={!!rateTarget}
+          targetUid={rateTarget.targetUid}
+          targetName={rateTarget.targetName}
+          targetPhotoURL={rateTarget.targetPhotoURL}
+          sport={rateTarget.sport}
+          onClose={() => setRateTarget(null)}
+          onSuccess={() => {
+            showToast('Rating submitted successfully! Thank you for supporting fair play.', 'success');
+            setRateTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 };

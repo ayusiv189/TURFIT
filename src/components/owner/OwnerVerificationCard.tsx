@@ -127,7 +127,7 @@ export const OwnerVerificationCard: React.FC<OwnerVerificationCardProps> = ({
       });
       setFileUrl('');
       setDocName('');
-      setSuccess('Document uploaded successfully. TruFit Operations team will review it.');
+      setSuccess('Document uploaded successfully. TurFit Operations team will review it.');
       await loadData();
       if (onRefresh) onRefresh();
     } catch (err: any) {
@@ -228,7 +228,7 @@ export const OwnerVerificationCard: React.FC<OwnerVerificationCardProps> = ({
           <h3 className="text-lg font-bold text-white mt-1">{turf.name} Verification Hub</h3>
           <p className="text-xs text-slate-400">
             {status === 'verified'
-              ? 'Your venue is fully verified and discoverable on TruFit player search and bookings.'
+              ? 'Your venue is fully verified and discoverable on TurFit player search and bookings.'
               : 'Complete the verification checklist below to activate public bookings.'}
           </p>
         </div>

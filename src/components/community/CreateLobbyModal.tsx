@@ -4,7 +4,7 @@ import { db } from '../../lib/firebase';
 import { Booking, Lobby, LobbyPlayer, Turf, Arena, Slot } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { createLobbyWithSlotTransaction } from '../../lib/db';
-import { openRazorpayCheckout } from '../../lib/razorpay';
+import { openRazorpayCheckout, verifyPaymentWithOwnerBank } from '../../lib/razorpay';
 import {
   X,
   Activity,
@@ -20,6 +20,7 @@ import {
   Check,
   PlusCircle,
   Bookmark,
+  CreditCard,
 } from 'lucide-react';
 
 interface CreateLobbyModalProps {
@@ -49,6 +50,15 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
 
   // Direct Turf & Slot selection flow
   const [turfs, setTurfs] = useState<Turf[]>([]);
+  const [selectedCity, setSelectedCity] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('turfit_selected_city');
+      if (saved && saved.trim()) return saved.trim();
+    } catch {
+      // ignore
+    }
+    return 'Mumbai';
+  });
   const [selectedTurfId, setSelectedTurfId] = useState<string>('');
   const [arenas, setArenas] = useState<Arena[]>([]);
   const [selectedArenaId, setSelectedArenaId] = useState<string>('');
@@ -62,11 +72,16 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
   const [lobbyName, setLobbyName] = useState('');
   const [maxPlayers, setMaxPlayers] = useState<number>(10);
   const [minPlayers, setMinPlayers] = useState<number>(4);
+  const [initialSquadCount, setInitialSquadCount] = useState<number>(5);
+  const [hostAnnouncement, setHostAnnouncement] = useState<string>(
+    'We are 5 friends and we booked the slot! Looking for more players to join us for a fun competitive match.'
+  );
   const [pricePerPlayer, setPricePerPlayer] = useState<number>(0);
   const [isPublic, setIsPublic] = useState<boolean>(true);
   const [allowNewPlayers, setAllowNewPlayers] = useState<boolean>(true);
   const [description, setDescription] = useState('');
   const [rules, setRules] = useState('Bring your own kit. Please arrive 10 minutes prior to kick-off.');
+  const [upiPaymentMethod, setUpiPaymentMethod] = useState<'RAZORPAY_UPI' | 'DIRECT_UPI_QR'>('RAZORPAY_UPI');
 
   const [loading, setLoading] = useState(false);
   const [fetchingData, setFetchingData] = useState(false);
@@ -249,6 +264,16 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
     setErrorMsg(null);
 
     try {
+      const totalSlotCost =
+        creationMode === 'DIRECT_SLOT' && selectedSlot
+          ? selectedSlot.price
+          : selectedBooking
+          ? selectedBooking.totalAmount
+          : 0;
+
+      const dynamicCost = maxPlayers > 0 ? Math.ceil(totalSlotCost / maxPlayers) : pricePerPlayer;
+      const divisionNote = `₹${totalSlotCost} total slot / ${maxPlayers} players = ₹${dynamicCost} per person (${initialSquadCount} squad confirmed, ${Math.max(0, maxPlayers - initialSquadCount)} open spots)`;
+
       if (creationMode === 'DIRECT_SLOT') {
         // Requirement: Check slot availability with atomic Firestore transaction
         if (!selectedSlot || !selectedTurfId || !selectedArenaId) {
@@ -263,12 +288,15 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
         const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const dayName = days[new Date(selectedDate).getDay()];
 
+        // Advance UPI Payment
+        let upiTxnId = `UPI-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
         if (paymentMethod === 'PAY_NOW' && selectedSlot.price > 0) {
           try {
-            await openRazorpayCheckout({
+            const rzpRes = await openRazorpayCheckout({
               amount: selectedSlot.price,
-              name: 'TruFit Turf Booking',
-              description: `Slot Booking & Host Match for ${lobbyName.trim()}`,
+              name: 'TurFit Turf Booking (Advance UPI)',
+              description: `Confirmed Slot Booking for Lobby: ${lobbyName.trim()}`,
               prefill: {
                 name: profile.displayName || user.displayName || 'Athlete',
                 email: user.email || '',
@@ -278,10 +306,26 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
                 slotId: selectedSlot.id,
                 turfId: selectedTurfId,
                 arenaId: selectedArenaId,
+                lobbyName: lobbyName.trim(),
+                squadCount: String(initialSquadCount),
               },
             });
+
+            if (rzpRes && rzpRes.paymentId) {
+              const isVerifiedWithBank = await verifyPaymentWithOwnerBank(
+                rzpRes.paymentId,
+                selectedSlot.price,
+                selectedTurfObj?.ownerId
+              );
+              if (!isVerifiedWithBank) {
+                setErrorMsg('Payment verification with owner bank failed. Please try again.');
+                setLoading(false);
+                return;
+              }
+              upiTxnId = rzpRes.paymentId;
+            }
           } catch (payErr: any) {
-            setErrorMsg(payErr.message || 'Payment was cancelled or unsuccessful.');
+            setErrorMsg(payErr.message || 'UPI Payment was cancelled or unsuccessful.');
             setLoading(false);
             return;
           }
@@ -313,8 +357,14 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
           lobbyName: lobbyName.trim(),
           maxPlayers: Number(maxPlayers),
           minPlayers: Number(minPlayers),
-          pricePerPlayer: Number(pricePerPlayer),
-          description: description.trim() || `Community sports lobby for ${selectedArenaObj?.sport} at ${selectedTurfObj?.name}.`,
+          pricePerPlayer: Number(dynamicCost || pricePerPlayer),
+          initialSquadCount: Number(initialSquadCount),
+          hostAnnouncement: hostAnnouncement.trim(),
+          totalSlotPrice: selectedSlot.price,
+          dynamicCostPerPlayer: Number(dynamicCost || pricePerPlayer),
+          costDivisionNote: divisionNote,
+          upiTxnRef: upiTxnId,
+          description: description.trim() || `Community match lobby for ${selectedArenaObj?.sport} at ${selectedTurfObj?.name}.`,
           rules: rules.trim(),
           isPublic: isPublic,
           allowNewPlayers: allowNewPlayers,
@@ -357,8 +407,13 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
           endTime: selectedBooking.endTime,
           maxPlayers: Number(maxPlayers),
           minPlayers: Number(minPlayers),
-          currentPlayers: 1,
-          pricePerPlayer: Number(pricePerPlayer),
+          currentPlayers: Number(initialSquadCount),
+          initialSquadCount: Number(initialSquadCount),
+          hostAnnouncement: hostAnnouncement.trim(),
+          totalSlotPrice: selectedBooking.totalAmount,
+          dynamicCostPerPlayer: Number(dynamicCost || pricePerPlayer),
+          costDivisionNote: divisionNote,
+          pricePerPlayer: Number(dynamicCost || pricePerPlayer),
           description: description.trim() || `Public sports lobby for ${selectedBooking.sport} at ${selectedBooking.turfName}.`,
           rules: rules.trim(),
           isPublic: isPublic,
@@ -397,7 +452,6 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
       }
     } catch (err: any) {
       console.error('Error creating lobby:', err);
-      // Requirement: Show exact message if slot unavailable
       if (err.message && err.message.includes('slot is no longer available')) {
         setErrorMsg('This slot is no longer available. Please choose another slot.');
       } else {
@@ -481,20 +535,78 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
                 <span className="text-[11px] text-slate-500">Atomic Availability Guaranteed</span>
               </div>
 
-              {/* Turf dropdown */}
+              {/* City Selection for Turf */}
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Select Turf Venue *</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1">
+                  <MapPin className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Select City *</span>
+                </label>
                 <select
-                  value={selectedTurfId}
-                  onChange={(e) => handleTurfChange(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded-xl p-2.5 focus:outline-none focus:border-indigo-500"
+                  value={selectedCity}
+                  onChange={(e) => {
+                    const newCity = e.target.value;
+                    setSelectedCity(newCity);
+                    const cityTurfs = turfs.filter(
+                      (t) => newCity === 'ALL' || t.city?.toLowerCase().trim() === newCity.toLowerCase().trim()
+                    );
+                    if (cityTurfs.length > 0) {
+                      handleTurfChange(cityTurfs[0].id);
+                    } else {
+                      setSelectedTurfId('');
+                      setArenas([]);
+                      setSelectedArenaId('');
+                      setAvailableSlots([]);
+                      setSelectedSlotId('');
+                      setSelectedSlot(null);
+                    }
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded-xl p-2.5 focus:outline-none focus:border-indigo-500 mb-3"
                 >
-                  {turfs.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name} ({t.city || t.area})
+                  <option value="ALL">All Cities</option>
+                  {Array.from(
+                    new Set(
+                      turfs
+                        .map((t) => t.city?.trim())
+                        .filter((c): c is string => Boolean(c))
+                    )
+                  ).map((city) => (
+                    <option key={`lobby_city_${city}`} value={city}>
+                      {city}
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* Turf dropdown filtered by city */}
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Select Turf Venue ({selectedCity === 'ALL' ? 'All Cities' : `in ${selectedCity}`}) *
+                </label>
+                {turfs.filter(
+                  (t) => selectedCity === 'ALL' || t.city?.toLowerCase().trim() === selectedCity.toLowerCase().trim()
+                ).length === 0 ? (
+                  <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs text-amber-300">
+                    No turfs registered in {selectedCity}. Please select another city.
+                  </div>
+                ) : (
+                  <select
+                    value={selectedTurfId}
+                    onChange={(e) => handleTurfChange(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded-xl p-2.5 focus:outline-none focus:border-indigo-500"
+                  >
+                    {turfs
+                      .filter(
+                        (t) =>
+                          selectedCity === 'ALL' ||
+                          t.city?.toLowerCase().trim() === selectedCity.toLowerCase().trim()
+                      )
+                      .map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} ({t.area}, {t.city})
+                        </option>
+                      ))}
+                  </select>
+                )}
               </div>
 
               {/* Arena & Sport dropdown */}
@@ -569,31 +681,24 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
 
               {/* Payment Method for Direct Slot */}
               {selectedSlot && (
-                <div className="pt-2 flex items-center justify-between border-t border-slate-800 text-xs">
-                  <span className="text-slate-400 font-medium">Payment Option:</span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setPaymentMethod('PAY_LATER_AT_TURF')}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                        paymentMethod === 'PAY_LATER_AT_TURF'
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                          : 'bg-slate-900 text-slate-400 border border-slate-800'
-                      }`}
-                    >
-                      Pay Later at Turf
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPaymentMethod('PAY_NOW')}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                        paymentMethod === 'PAY_NOW'
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                          : 'bg-slate-900 text-slate-400 border border-slate-800'
-                      }`}
-                    >
-                      Pay Online Now
-                    </button>
+                <div className="pt-3 border-t border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                      <CreditCard className="w-3.5 h-3.5" /> Advance UPI Payment Confirmation
+                    </span>
+                    <span className="text-[10px] font-bold text-emerald-300 bg-emerald-950/80 border border-emerald-500/30 px-2 py-0.5 rounded-md">
+                      Instant Slot Lock
+                    </span>
+                  </div>
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex flex-col gap-2">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-slate-300 font-medium">Slot Advance Total:</span>
+                      <span className="text-sm font-bold text-emerald-400">₹{selectedSlot.price}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 border-t border-slate-800/60 pt-1.5">
+                      <span>Supported UPI Apps:</span>
+                      <span className="text-slate-300 font-semibold">GPay • PhonePe • Paytm • BHIM QR</span>
+                    </div>
                   </div>
                 </div>
               )}
@@ -674,11 +779,70 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
             />
           </div>
 
+          {/* Friends in Squad & Host Open Call Announcement */}
+          <div className="bg-slate-950/70 border border-indigo-900/40 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5" /> Matchmaking Squad & Announcement
+              </span>
+              <span className="text-[11px] text-slate-400">
+                {Math.max(0, maxPlayers - initialSquadCount)} spots open for community
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                  How many friends are already playing? (Squad Count)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={maxPlayers}
+                  value={initialSquadCount}
+                  onChange={(e) => setInitialSquadCount(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded-xl p-2.5 focus:outline-none focus:border-indigo-500"
+                />
+                <span className="text-[10px] text-slate-500 mt-0.5 block">
+                  e.g. We are 5 friends who booked the slot
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                  Dynamic Cost per Player
+                </label>
+                <div className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-xs flex items-center justify-between">
+                  <span className="text-slate-400">Total Slot: ₹{creationMode === 'DIRECT_SLOT' && selectedSlot ? selectedSlot.price : selectedBooking ? selectedBooking.totalAmount : 0}</span>
+                  <span className="font-bold text-emerald-400 font-mono">
+                    ₹{maxPlayers > 0 ? Math.ceil(((creationMode === 'DIRECT_SLOT' && selectedSlot ? selectedSlot.price : selectedBooking ? selectedBooking.totalAmount : 0) / maxPlayers)) : pricePerPlayer} / player
+                  </span>
+                </div>
+                <span className="text-[10px] text-slate-500 mt-0.5 block">
+                  Split equally across all {maxPlayers} players
+                </span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                Host Message / Open Call Announcement 💬
+              </label>
+              <textarea
+                rows={2}
+                value={hostAnnouncement}
+                onChange={(e) => setHostAnnouncement(e.target.value)}
+                placeholder="e.g. We are 5 friends looking for 3 more players for a 5v5 friendly match. Please bring boots!"
+                className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded-xl p-2.5 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+          </div>
+
           {/* Capacity and Split Cost */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                Max Players
+                Total Match Capacity
               </label>
               <input
                 type="number"
@@ -691,7 +855,7 @@ export const CreateLobbyModal: React.FC<CreateLobbyModalProps> = ({
             </div>
             <div>
               <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                Min Required
+                Min Required to Play
               </label>
               <input
                 type="number"

@@ -92,7 +92,7 @@ export const RewardsTab: React.FC<RewardsTabProps> = ({ showToast }) => {
     return (
       <div className="py-12 flex flex-col items-center justify-center text-slate-500 text-xs">
         <span className="inline-block w-6 h-6 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-2" />
-        Loading TruFit Rewards & Points...
+        Loading TurFit Rewards & Points...
       </div>
     );
   }
@@ -107,7 +107,7 @@ export const RewardsTab: React.FC<RewardsTabProps> = ({ showToast }) => {
           <div>
             <div className="flex items-center gap-2 text-indigo-400 font-bold text-xs uppercase tracking-wider mb-1">
               <Sparkles className="w-4 h-4 text-amber-400" />
-              <span>TruFit Loyalty Program</span>
+              <span>TurFit Loyalty Program</span>
             </div>
             <h2 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
               Play Turf Games. Earn Points.

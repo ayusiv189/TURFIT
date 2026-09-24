@@ -11,25 +11,35 @@ import {
   orderBy,
   runTransaction,
   limit,
+  addDoc,
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import {
   Lobby,
   LobbyPlayer,
+  PlayerPool,
+  PoolInterestedPlayer,
+  MatchHoursCategory,
   Team,
   TeamMember,
   Match,
   MatchPlayer,
   TurfReview,
+  PlayerRating,
+  PlayerBadgeType,
+  PlayerSportsmanshipStats,
   Offer,
   UserRewardWallet,
   InAppNotification,
   BookingPlayerShare,
   UserProfile,
+  PaymentRecord,
+  RefundRecord,
 } from '../types';
-import { sanitizeData } from './dbService';
+import { sanitizeData, getTurfs, getArenasByTurf, getSlotsByArenaAndDate } from './dbService';
+import { sendPushNotification } from './pushNotificationService';
 
-// ==================== LOBBIES ====================
+// ==================== LOBBIES & DYNAMIC SPLIT PAYMENTS ====================
 
 export async function getLobbies(): Promise<Lobby[]> {
   try {
@@ -37,52 +47,44 @@ export async function getLobbies(): Promise<Lobby[]> {
     const q = query(colRef, limit(100));
     const snap = await getDocs(q);
 
+    // Calculate local date string YYYY-MM-DD
     const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    const curTimeVal = now.getHours() * 60 + now.getMinutes();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const localTodayStr = `${year}-${month}-${day}`;
 
     const activeList: Lobby[] = [];
 
     for (const d of snap.docs) {
       const data = d.data() as any;
-      if (data.status === 'CANCELLED' || data.isExpired) continue;
+      if (data.status === 'CANCELLED') continue;
 
-      let isExpired = false;
-      if (data.date < todayStr) {
-        isExpired = true;
-      } else if (data.date === todayStr && data.endTime) {
-        let endH = 0;
-        let endM = 0;
-        const parts = data.endTime.split(' ');
-        const timePart = parts[0];
-        const ampm = parts[1]?.toUpperCase();
-        const [hStr, mStr] = timePart.split(':');
-        endH = parseInt(hStr, 10) || 0;
-        endM = parseInt(mStr, 10) || 0;
-        if (ampm === 'PM' && endH < 12) endH += 12;
-        if (ampm === 'AM' && endH === 12) endH = 0;
-        const endTimeVal = endH * 60 + endM;
-        if (curTimeVal > endTimeVal) {
-          isExpired = true;
-        }
-      }
-
-      if (isExpired) {
-        // Auto-delete / expire lobby when game time is over
-        updateDoc(d.ref, {
-          status: 'CLOSED',
-          isExpired: true,
-          updatedAt: new Date().toISOString(),
-        }).catch(() => {});
+      // Only skip if the match date is strictly in the past (e.g. yesterday or older) and explicitly marked
+      if (data.date && data.date < localTodayStr && data.status === 'CLOSED') {
         continue;
       }
+
+      const currentCount = Number(data.currentPlayers) || 1;
+      const totalSlot = Number(data.totalSlotPrice) || (Number(data.pricePerPlayer || 150) * (Number(data.maxPlayers) || 10));
+      const dynamicCost = Math.round(totalSlot / Math.max(1, currentCount));
 
       activeList.push({
         id: d.id,
         ...data,
+        status: data.status || 'OPEN',
+        totalSlotPrice: totalSlot,
+        dynamicCostPerPlayer: dynamicCost,
         players: data.players || (data.playerUids ? data.playerUids.map((uid: string) => ({ playerId: uid, uid })) : []),
       } as unknown as Lobby);
     }
+
+    activeList.sort((a, b) => {
+      if (a.date && b.date && a.date !== b.date) {
+        return a.date.localeCompare(b.date);
+      }
+      return (b.createdAt || '').localeCompare(a.createdAt || '');
+    });
 
     return activeList;
   } catch (err) {
@@ -99,13 +101,18 @@ export async function createLobby(lobbyData: {
   creatorId: string;
   creatorName: string;
   maxPlayers: number;
+  minPlayers?: number;
   date: string;
   startTime: string;
   endTime: string;
   pricePerPlayer: number;
+  totalSlotPrice?: number;
 }): Promise<string> {
   const newLobbyRef = doc(collection(db, 'lobbies'));
   const now = new Date().toISOString();
+  const totalSlot = lobbyData.totalSlotPrice || (lobbyData.pricePerPlayer * lobbyData.maxPlayers);
+  const minAthletes = lobbyData.minPlayers || Math.max(2, Math.floor(lobbyData.maxPlayers / 2));
+
   const payload = {
     id: newLobbyRef.id,
     name: lobbyData.name,
@@ -125,9 +132,11 @@ export async function createLobby(lobbyData: {
     startTime: lobbyData.startTime,
     endTime: lobbyData.endTime,
     maxPlayers: lobbyData.maxPlayers,
-    minPlayers: 2,
+    minPlayers: minAthletes,
     currentPlayers: 1,
     pricePerPlayer: lobbyData.pricePerPlayer,
+    totalSlotPrice: totalSlot,
+    dynamicCostPerPlayer: totalSlot,
     description: `Pick-up match for ${lobbyData.sport} athletes`,
     isPublic: true,
     allowNewPlayers: true,
@@ -139,6 +148,10 @@ export async function createLobby(lobbyData: {
         uid: lobbyData.creatorId,
         playerName: lobbyData.creatorName,
         isHost: true,
+        paymentMethod: 'PAY_LATER_AT_TURF',
+        paymentStatus: 'DUE',
+        amountDue: lobbyData.pricePerPlayer,
+        amountPaid: 0,
         joinedAt: now,
       },
     ],
@@ -174,11 +187,21 @@ export async function createLobbyWithSlotTransaction(params: {
   maxPlayers: number;
   minPlayers: number;
   pricePerPlayer: number;
+  initialSquadCount?: number;
+  hostAnnouncement?: string;
+  costDivisionNote?: string;
   description?: string;
   rules?: string;
   isPublic?: boolean;
   allowNewPlayers?: boolean;
   paymentMethod?: 'PAY_NOW' | 'PAY_LATER_AT_TURF';
+  upiTxnRef?: string;
+  advanceAmount?: number;
+  bankUtr?: string;
+  merchantOrderRef?: string;
+  verificationSource?: 'MERCHANT_UPI_WEBHOOK' | 'MANUAL_SELF_REPORT';
+  webhookVerifiedAt?: string;
+  gatewayUsed?: string;
 }): Promise<{ lobbyId: string; bookingId: string }> {
   return await runTransaction(db, async (tx) => {
     const slotDocRef = doc(db, 'slots', params.slotId);
@@ -196,17 +219,24 @@ export async function createLobbyWithSlotTransaction(params: {
 
     const now = new Date().toISOString();
     const isPaid = params.paymentMethod === 'PAY_NOW';
-    const amountPaid = isPaid ? params.totalAmount : 0;
-    const amountDue = params.totalAmount - amountPaid;
-    const paymentStatus = isPaid ? 'PAID' : 'PENDING';
+    const effectiveAdvance = params.advanceAmount !== undefined ? params.advanceAmount : (isPaid ? params.totalAmount : 0);
+    const amountPaid = isPaid ? effectiveAdvance : 0;
+    const amountDue = Math.max(0, params.totalAmount - amountPaid);
+    const paymentStatus = amountPaid >= params.totalAmount ? 'PAID' : (amountPaid > 0 ? 'PARTIALLY_PAID' : 'PENDING');
+    const isWebhook = params.verificationSource === 'MERCHANT_UPI_WEBHOOK' || !!params.bankUtr;
 
     const newBookingRef = doc(collection(db, 'bookings'));
     const newLobbyRef = doc(collection(db, 'lobbies'));
     const lobbyId = newLobbyRef.id;
+    const bookingCode = `TF-MOB-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    const squadNum = params.initialSquadCount || 1;
+    const dynamicCost = params.maxPlayers > 0 ? Math.ceil(params.totalAmount / params.maxPlayers) : params.pricePerPlayer;
+    const costNote = params.costDivisionNote || `₹${params.totalAmount} slot cost / ${params.maxPlayers} players = ₹${dynamicCost} per player (${squadNum} confirmed, ${Math.max(0, params.maxPlayers - squadNum)} open spots)`;
 
     const bookingData = {
       id: newBookingRef.id,
-      bookingId: `TF-MOB-${Math.floor(100000 + Math.random() * 900000)}`,
+      bookingId: bookingCode,
       playerId: params.hostId,
       playerName: params.hostName,
       playerEmail: params.hostEmail,
@@ -230,12 +260,21 @@ export async function createLobbyWithSlotTransaction(params: {
       totalAmount: params.totalAmount,
       amountPaid: amountPaid,
       amountDue: amountDue,
+      advancePaid: amountPaid,
       paymentStatus: paymentStatus,
       bookingStatus: 'CONFIRMED',
       bookingType: 'PLAYER',
-      paymentMethod: params.paymentMethod || 'PAY_LATER_AT_TURF',
+      paymentMethod: params.paymentMethod || 'PAY_NOW',
+      numberOfPlayers: Number(params.maxPlayers),
+      playerShareAmount: Number(dynamicCost),
       lobbyCreated: true,
       lobbyId: lobbyId,
+      upiTxnRef: params.bankUtr || params.upiTxnRef || null,
+      merchantOrderRef: params.merchantOrderRef || null,
+      bankUtr: params.bankUtr || null,
+      verificationSource: params.verificationSource || (isWebhook ? 'MERCHANT_UPI_WEBHOOK' : 'MANUAL_SELF_REPORT'),
+      webhookVerifiedAt: params.webhookVerifiedAt || (isWebhook ? now : undefined),
+      gatewayUsed: params.gatewayUsed || (isWebhook ? 'PHONEPE_BUSINESS' : undefined),
       createdAt: now,
       updatedAt: now,
     };
@@ -270,11 +309,23 @@ export async function createLobbyWithSlotTransaction(params: {
       startTime: params.startTime,
       endTime: params.endTime,
       maxPlayers: Number(params.maxPlayers),
-      minPlayers: Number(params.minPlayers || 2),
-      currentPlayers: 1,
-      pricePerPlayer: Number(params.pricePerPlayer),
-      description: params.description?.trim() || `Pick-up match for ${params.sport}`,
-      rules: params.rules?.trim() || 'Arrive 10 mins prior.',
+      minPlayers: Number(params.minPlayers || Math.max(2, Math.floor(params.maxPlayers / 2))),
+      currentPlayers: squadNum,
+      initialSquadCount: squadNum,
+      hostAnnouncement: params.hostAnnouncement || '',
+      pricePerPlayer: Number(dynamicCost),
+      totalSlotPrice: Number(params.totalAmount),
+      dynamicCostPerPlayer: Number(dynamicCost),
+      costDivisionNote: costNote,
+      advancePaid: amountPaid > 0,
+      advanceAmount: amountPaid,
+      upiTxnRef: params.bankUtr || params.upiTxnRef || `UPI-${Date.now().toString(36).toUpperCase()}`,
+      merchantOrderRef: params.merchantOrderRef || null,
+      bankUtr: params.bankUtr || null,
+      verificationSource: params.verificationSource || (isWebhook ? 'MERCHANT_UPI_WEBHOOK' : 'MANUAL_SELF_REPORT'),
+      webhookVerifiedAt: params.webhookVerifiedAt || (isWebhook ? now : undefined),
+      description: params.description?.trim() || `Squad match for ${params.sport} athletes`,
+      rules: params.rules?.trim() || 'Arrive 10 mins prior with kit.',
       isPublic: params.isPublic !== false,
       allowNewPlayers: params.allowNewPlayers !== false,
       status: 'OPEN',
@@ -286,6 +337,12 @@ export async function createLobbyWithSlotTransaction(params: {
           playerName: params.hostName,
           playerPhotoURL: params.hostPhotoURL || null,
           isHost: true,
+          paymentMethod: params.paymentMethod || 'PAY_NOW',
+          paymentStatus: amountPaid > 0 ? 'PAID' : 'DUE',
+          amountPaid: amountPaid,
+          amountDue: amountDue,
+          upiTxnRef: params.bankUtr || params.upiTxnRef || null,
+          bankUtr: params.bankUtr || null,
           joinedAt: now,
         },
       ],
@@ -303,8 +360,67 @@ export async function createLobbyWithSlotTransaction(params: {
       playerName: params.hostName,
       playerPhotoURL: params.hostPhotoURL || null,
       isHost: true,
+      paymentMethod: params.paymentMethod || 'PAY_LATER_AT_TURF',
+      paymentStatus: amountPaid > 0 ? 'PAID' : 'DUE',
+      amountPaid: amountPaid,
+      amountDue: amountDue,
+      remainingAmount: amountDue,
+      upiTxnRef: params.bankUtr || params.upiTxnRef || null,
+      bankUtr: params.bankUtr || null,
       joinedAt: now,
     }));
+
+    // If Host paid online / UPI advance, log ledger entry
+    if (isPaid && amountPaid > 0) {
+      const paymentTxRef = doc(collection(db, 'paymentTransactions'));
+      tx.set(paymentTxRef, sanitizeData({
+        id: paymentTxRef.id,
+        transactionId: params.bankUtr || `TXN-UPI-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
+        bookingId: newBookingRef.id,
+        lobbyId: lobbyId,
+        playerId: params.hostId,
+        playerName: params.hostName,
+        ownerId: currentSlot.ownerId,
+        amount: amountPaid,
+        advanceAmount: amountPaid,
+        paymentMethod: 'UPI',
+        paymentType: 'LOBBY_ADVANCE',
+        status: 'SUCCESS',
+        upiTxnRef: params.bankUtr || params.upiTxnRef || `UPI-APP-${Date.now()}`,
+        bankUtr: params.bankUtr || null,
+        merchantOrderRef: params.merchantOrderRef || null,
+        verificationSource: params.verificationSource || (isWebhook ? 'MERCHANT_UPI_WEBHOOK' : 'MANUAL_SELF_REPORT'),
+        webhookVerifiedAt: params.webhookVerifiedAt || (isWebhook ? now : undefined),
+        gatewayUsed: params.gatewayUsed || 'PHONEPE_BUSINESS',
+        notes: `Lobby advance payment for "${params.lobbyName}" (${params.date} ${params.startTime})`,
+        createdAt: now,
+      }));
+    } else if (amountDue > 0) {
+      // Create due record
+      const dueId = `${newBookingRef.id}_${params.hostId}`;
+      const dueDocRef = doc(db, 'dues', dueId);
+      tx.set(dueDocRef, sanitizeData({
+        id: dueId,
+        bookingId: newBookingRef.id,
+        turfId: params.turfId,
+        turfName: params.turfName,
+        ownerId: currentSlot.ownerId,
+        playerId: params.hostId,
+        playerName: params.hostName,
+        playerEmail: params.hostEmail,
+        playerPhone: params.hostPhone || '',
+        amountDue: params.pricePerPlayer,
+        amountPaid: 0,
+        remainingAmount: params.pricePerPlayer,
+        status: 'PENDING',
+        date: params.date,
+        startTime: params.startTime,
+        endTime: params.endTime,
+        bookingRef: params.lobbyName,
+        createdAt: now,
+        updatedAt: now,
+      }));
+    }
 
     return { lobbyId, bookingId: newBookingRef.id };
   });
@@ -320,11 +436,15 @@ export async function joinLobby(
     playerPhotoURL?: string;
     isHost?: boolean;
     paymentMethod?: 'PAY_NOW' | 'PAY_LATER_AT_TURF';
+    upiTxnRef?: string;
+    upiId?: string;
   }
-): Promise<void> {
+): Promise<{ transactionId?: string; dynamicCost: number }> {
   const lobbyDocRef = doc(db, 'lobbies', lobbyId);
   const participantId = `${lobbyId}_${player.uid}`;
   const participantRef = doc(db, 'lobbyPlayers', participantId);
+  let generatedTxnId: string | undefined;
+  let computedDynamicCost = 0;
 
   await runTransaction(db, async (tx) => {
     const lobbySnap = await tx.get(lobbyDocRef);
@@ -341,15 +461,19 @@ export async function joinLobby(
     }
 
     const pricePerPlayer = Number(lobby.pricePerPlayer) || 0;
+    const totalSlot = Number(lobby.totalSlotPrice) || (pricePerPlayer * Number(lobby.maxPlayers || 10));
     const isPayNow = player.paymentMethod === 'PAY_NOW';
     const amountPaid = isPayNow ? pricePerPlayer : 0;
     const amountDue = isPayNow ? 0 : pricePerPlayer;
     const paymentStatus = isPayNow ? 'PAID' : 'DUE';
 
     const newCount = (lobby.currentPlayers || 0) + 1;
+    computedDynamicCost = Math.round(totalSlot / Math.max(1, newCount));
     const now = new Date().toISOString();
     const updatedUids = [...existingUids, player.uid];
     const existingPlayers = lobby.players || [];
+    const upiRef = player.upiTxnRef || (isPayNow ? `UPI-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}` : undefined);
+
     const updatedPlayers = [
       ...existingPlayers,
       {
@@ -362,6 +486,7 @@ export async function joinLobby(
         paymentStatus,
         amountPaid,
         amountDue,
+        upiTxnRef: upiRef || null,
         joinedAt: now,
       },
     ];
@@ -380,26 +505,56 @@ export async function joinLobby(
         amountPaid,
         amountDue,
         remainingAmount: amountDue,
+        upiTxnRef: upiRef || null,
         joinedAt: now,
       })
     );
+
+    const isFull = newCount >= lobby.maxPlayers;
 
     tx.update(
       lobbyDocRef,
       sanitizeData({
         currentPlayers: newCount,
+        dynamicCostPerPlayer: computedDynamicCost,
         playerUids: updatedUids,
         players: updatedPlayers,
-        status: newCount >= lobby.maxPlayers ? 'FULL' : 'OPEN',
+        status: isFull ? 'FULL' : 'OPEN',
         updatedAt: now,
       })
     );
 
-    // If there is an active booking, create or update the bookingPlayers share record and dues
-    const dueId = `${lobby.bookingId || lobbyId}_${player.uid}`;
-    const dueDocRef = doc(db, 'dues', dueId);
-
-    if (!isPayNow && pricePerPlayer > 0) {
+    // Instant Transaction Ledger entry for UPI / Online share payment
+    if (isPayNow && pricePerPlayer > 0) {
+      const paymentTxRef = doc(collection(db, 'paymentTransactions'));
+      generatedTxnId = `TXN-UPI-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      tx.set(
+        paymentTxRef,
+        sanitizeData({
+          id: paymentTxRef.id,
+          transactionId: generatedTxnId,
+          bookingId: lobby.bookingId || lobbyId,
+          lobbyId: lobby.id,
+          lobbyName: lobby.name,
+          turfName: lobby.turfName || 'Turf Pitch',
+          playerId: player.uid,
+          playerName: player.playerName,
+          playerEmail: player.playerEmail || '',
+          ownerId: lobby.hostId || '',
+          amount: pricePerPlayer,
+          paymentMethod: 'UPI',
+          upiId: player.upiId || 'athlete@upi',
+          upiTxnRef: upiRef,
+          status: 'SUCCESS',
+          type: 'SQUAD_SPLIT_SHARE',
+          notes: `Individual share fee for ${lobby.name}`,
+          createdAt: now,
+        })
+      );
+    } else if (!isPayNow && pricePerPlayer > 0) {
+      // Option: PAY LATER AT TURF COUNTER -> Record in Dues ledger
+      const dueId = `${lobby.bookingId || lobbyId}_${player.uid}`;
+      const dueDocRef = doc(db, 'dues', dueId);
       tx.set(
         dueDocRef,
         sanitizeData({
@@ -444,45 +599,61 @@ export async function joinLobby(
           amountDue,
           status: paymentStatus === 'PAID' ? 'PAID' : 'PENDING',
           paymentMethod: player.paymentMethod || 'PAY_LATER_AT_TURF',
+          upiTxnRef: upiRef || null,
           lastPaymentAt: isPayNow ? now : null,
           createdAt: now,
           updatedAt: now,
         })
       );
+    }
 
-      if (isPayNow && pricePerPlayer > 0) {
-        const paymentRef = doc(collection(db, 'payments'));
-        tx.set(
-          paymentRef,
-          sanitizeData({
-            id: paymentRef.id,
-            bookingId: lobby.bookingId,
-            turfId: lobby.turfId,
-            ownerId: lobby.hostId || '',
-            playerId: player.uid,
-            playerName: player.playerName,
-            amount: pricePerPlayer,
-            paymentMethod: 'ONLINE',
-            status: 'PAID',
-            type: 'PLAYER_SHARE',
-            note: `Lobby share payment for ${lobby.name}`,
-            createdAt: now,
-          })
-        );
-      }
+    // In-App Notification to Host
+    if (lobby.hostId && lobby.hostId !== player.uid) {
+      const notifRef = doc(collection(db, 'notifications'));
+      tx.set(
+        notifRef,
+        sanitizeData({
+          id: notifRef.id,
+          recipientId: lobby.hostId,
+          title: isPayNow ? 'Player Joined & Paid (UPI)' : 'Player Joined (Pay Later)',
+          message: `${player.playerName} joined "${lobby.name}" (${isPayNow ? `₹${pricePerPlayer} paid via UPI` : `₹${pricePerPlayer} due at turf`}).`,
+          type: 'LOBBY_JOINED',
+          relatedId: lobby.id,
+          relatedType: 'LOBBY',
+          isRead: false,
+          createdAt: now,
+        })
+      );
     }
   });
+
+  return { transactionId: generatedTxnId, dynamicCost: computedDynamicCost };
 }
 
-export async function leaveLobby(lobbyId: string, uid: string): Promise<void> {
+// ==================== STEP-OUT & INSTANT REFUND ====================
+
+export async function processLobbyStepOutRefund(
+  lobbyId: string,
+  uid: string,
+  reason: string = 'Athlete stepped out of lobby'
+): Promise<{ refunded: boolean; refundAmount: number; refundTxnId?: string }> {
   const lobbyDocRef = doc(db, 'lobbies', lobbyId);
   const participantId = `${lobbyId}_${uid}`;
   const participantRef = doc(db, 'lobbyPlayers', participantId);
+
+  let wasRefunded = false;
+  let amountRefunded = 0;
+  let refundTxnCode: string | undefined;
 
   await runTransaction(db, async (tx) => {
     const lobbySnap = await tx.get(lobbyDocRef);
     if (!lobbySnap.exists()) return;
     const lobby = lobbySnap.data() as any;
+
+    const gameStatus = getLobbyGameStatus(lobby);
+    if (gameStatus === 'LIVE' || gameStatus === 'OVER') {
+      throw new Error('This match has already started or concluded. Athletes cannot leave the lobby without playing.');
+    }
 
     const existingUids: string[] = lobby.playerUids || [];
     const updatedUids = existingUids.filter((id) => id !== uid);
@@ -492,37 +663,94 @@ export async function leaveLobby(lobbyId: string, uid: string): Promise<void> {
     const newCount = Math.max(0, (lobby.currentPlayers || 1) - 1);
     const now = new Date().toISOString();
 
-    // 1. If player had dues for this lobby, cancel/delete them
+    const totalSlot = Number(lobby.totalSlotPrice) || (Number(lobby.pricePerPlayer) * Number(lobby.maxPlayers || 10));
+    const dynamicCost = Math.round(totalSlot / Math.max(1, newCount));
+
+    // 1. Remove pending dues if player selected Pay Later
     const dueId = `${lobby.bookingId || lobbyId}_${uid}`;
     const dueDocRef = doc(db, 'dues', dueId);
     tx.delete(dueDocRef);
 
-    // 2. If player had paid online, create refund record
-    if (leavingPlayer && leavingPlayer.amountPaid > 0) {
+    // 2. Real-time Instant Refund Ledger Entry if athlete paid share online / UPI
+    if (leavingPlayer && Number(leavingPlayer.amountPaid) > 0) {
+      wasRefunded = true;
+      amountRefunded = Number(leavingPlayer.amountPaid);
+      refundTxnCode = `REF-UPI-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
       const refundRef = doc(collection(db, 'refunds'));
       tx.set(refundRef, sanitizeData({
         id: refundRef.id,
+        refundTxnId: refundTxnCode,
         bookingId: lobby.bookingId || lobbyId,
+        lobbyId: lobby.id,
+        lobbyName: lobby.name,
         turfId: lobby.turfId,
+        turfName: lobby.turfName || 'Sports Turf',
         playerId: uid,
-        playerName: leavingPlayer.playerName || 'Player',
-        amount: leavingPlayer.amountPaid,
-        status: 'REFUNDED_TO_SOURCE',
-        reason: 'Player stepped out of lobby',
+        playerName: leavingPlayer.playerName || 'Athlete',
+        amount: amountRefunded,
+        refundMethod: 'UPI_SOURCE_REVERSAL',
+        originalUpiTxnRef: leavingPlayer.upiTxnRef || 'UPI_DIRECT',
+        status: 'PROCESSED',
+        reason: reason,
         createdAt: now,
         updatedAt: now,
       }));
+
+      // Also append to payment transactions as REFUND
+      const paymentTxRef = doc(collection(db, 'paymentTransactions'));
+      tx.set(paymentTxRef, sanitizeData({
+        id: paymentTxRef.id,
+        transactionId: refundTxnCode,
+        bookingId: lobby.bookingId || lobbyId,
+        lobbyId: lobby.id,
+        playerId: uid,
+        playerName: leavingPlayer.playerName || 'Athlete',
+        ownerId: lobby.hostId || '',
+        amount: amountRefunded,
+        paymentMethod: 'UPI_REFUND',
+        status: 'SUCCESS',
+        type: 'SQUAD_STEP_OUT_REFUND',
+        notes: `Instant refund of ₹${amountRefunded} for stepping out of ${lobby.name}`,
+        createdAt: now,
+      }));
     }
 
+    // 3. Remove participant doc
     tx.delete(participantRef);
+
+    // 4. Update lobby with decremented count and recalculated dynamic cost division
     tx.update(lobbyDocRef, sanitizeData({
       currentPlayers: newCount,
+      dynamicCostPerPlayer: dynamicCost,
       playerUids: updatedUids,
       players: updatedPlayers,
       status: 'OPEN',
       updatedAt: now,
     }));
+
+    // 5. Notify host of departure & updated squad count
+    if (lobby.hostId && lobby.hostId !== uid) {
+      const notifRef = doc(collection(db, 'notifications'));
+      tx.set(notifRef, sanitizeData({
+        id: notifRef.id,
+        recipientId: lobby.hostId,
+        title: 'Player Stepped Out',
+        message: `${leavingPlayer?.playerName || 'An athlete'} stepped out of "${lobby.name}". ${newCount}/${lobby.maxPlayers} spots filled.`,
+        type: 'LOBBY_LEFT',
+        relatedId: lobby.id,
+        relatedType: 'LOBBY',
+        isRead: false,
+        createdAt: now,
+      }));
+    }
   });
+
+  return { refunded: wasRefunded, refundAmount: amountRefunded, refundTxnId: refundTxnCode };
+}
+
+export async function leaveLobby(lobbyId: string, uid: string): Promise<void> {
+  await processLobbyStepOutRefund(lobbyId, uid);
 }
 
 export async function toggleLobbyJoin(
@@ -531,7 +759,9 @@ export async function toggleLobbyJoin(
   playerName: string,
   photoURL?: string,
   paymentMethod?: 'PAY_NOW' | 'PAY_LATER_AT_TURF',
-  playerEmail?: string
+  playerEmail?: string,
+  upiTxnRef?: string,
+  upiId?: string
 ): Promise<void> {
   const lobbyDocRef = doc(db, 'lobbies', lobbyId);
   const snap = await getDoc(lobbyDocRef);
@@ -539,9 +769,16 @@ export async function toggleLobbyJoin(
   const lobbyData = snap.data();
   const playerUids: string[] = lobbyData.playerUids || (lobbyData.players || []).map((p: any) => p.playerId || p.uid);
 
+  const gameStatus = getLobbyGameStatus(lobbyData as any);
   if (playerUids.includes(uid)) {
+    if (gameStatus === 'LIVE' || gameStatus === 'OVER') {
+      throw new Error('This match has already started or concluded. Athletes cannot leave the lobby without playing.');
+    }
     await leaveLobby(lobbyId, uid);
   } else {
+    if (gameStatus === 'LIVE' || gameStatus === 'OVER') {
+      throw new Error('This match has already started or concluded. New athletes cannot join.');
+    }
     await joinLobby(lobbyId, {
       uid,
       playerName,
@@ -549,8 +786,582 @@ export async function toggleLobbyJoin(
       playerEmail,
       isHost: false,
       paymentMethod: paymentMethod || 'PAY_LATER_AT_TURF',
+      upiTxnRef,
+      upiId,
     });
   }
+}
+
+// ==================== PLAYER POOLS & SQUAD MATCHMAKING ====================
+
+export async function getPlayerPools(filters?: {
+  sport?: string;
+  matchHoursCategory?: MatchHoursCategory;
+  city?: string;
+}): Promise<PlayerPool[]> {
+  try {
+    const colRef = collection(db, 'playerPools');
+    const q = query(colRef, limit(100));
+    const snap = await getDocs(q);
+
+    const list: PlayerPool[] = [];
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+
+    for (const d of snap.docs) {
+      const data = { id: d.id, ...d.data() } as PlayerPool;
+      if (data.status === 'CANCELLED' || data.status === 'EXPIRED') continue;
+      if (data.preferredDate && data.preferredDate < todayStr) continue;
+
+      if (filters?.sport && filters.sport !== 'All' && data.sport.toLowerCase() !== filters.sport.toLowerCase()) {
+        continue;
+      }
+
+      if (
+        filters?.matchHoursCategory &&
+        filters.matchHoursCategory !== 'ALL' &&
+        data.matchHoursCategory !== filters.matchHoursCategory
+      ) {
+        continue;
+      }
+
+      if (filters?.city && filters.city !== 'All' && data.city.toLowerCase() !== filters.city.toLowerCase()) {
+        continue;
+      }
+
+      list.push(data);
+    }
+
+    list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return list;
+  } catch (err) {
+    console.warn('Error getting player pools:', err);
+    return [];
+  }
+}
+
+export async function createPlayerPool(poolData: {
+  creatorId: string;
+  creatorName: string;
+  creatorPhone?: string;
+  creatorPhotoURL?: string;
+  sport: string;
+  city: string;
+  area?: string;
+  preferredDate: string;
+  preferredTime: string;
+  preferredHours?: string;
+  matchHoursCategory?: MatchHoursCategory;
+  requiredPlayers: number;
+  maxPricePerPlayer: number;
+  preferredTurfId?: string;
+  preferredTurfName?: string;
+  description?: string;
+}): Promise<string> {
+  const newPoolRef = doc(collection(db, 'playerPools'));
+  const now = new Date().toISOString();
+
+  const initialInterestedPlayer: PoolInterestedPlayer = {
+    uid: poolData.creatorId,
+    name: poolData.creatorName,
+    phone: poolData.creatorPhone,
+    photoURL: poolData.creatorPhotoURL,
+    skillLevel: 'Athlete',
+    paymentPreference: 'UPI',
+    joinedAt: now,
+  };
+
+  const estimatedTotal = poolData.requiredPlayers * poolData.maxPricePerPlayer;
+
+  const payload: PlayerPool = {
+    id: newPoolRef.id,
+    creatorId: poolData.creatorId,
+    creatorName: poolData.creatorName,
+    creatorPhone: poolData.creatorPhone,
+    creatorPhotoURL: poolData.creatorPhotoURL,
+    sport: poolData.sport,
+    city: poolData.city,
+    area: poolData.area || '',
+    preferredDate: poolData.preferredDate,
+    preferredTime: poolData.preferredTime,
+    preferredHours: poolData.preferredHours || '6:00 PM - 8:00 PM',
+    matchHoursCategory: poolData.matchHoursCategory || 'EVENING',
+    requiredPlayers: poolData.requiredPlayers,
+    currentPlayersCount: 1,
+    maxPricePerPlayer: poolData.maxPricePerPlayer,
+    estimatedTotalBudget: estimatedTotal,
+    preferredTurfId: poolData.preferredTurfId,
+    preferredTurfName: poolData.preferredTurfName,
+    description: poolData.description || `Squad interest group for ${poolData.sport} athletes in ${poolData.city}`,
+    status: 'OPEN',
+    interestedPlayers: [initialInterestedPlayer],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await setDoc(newPoolRef, sanitizeData(payload));
+  return newPoolRef.id;
+}
+
+export async function joinPlayerPool(
+  poolId: string,
+  player: {
+    uid: string;
+    name: string;
+    phone?: string;
+    photoURL?: string;
+    skillLevel?: string;
+    paymentPreference?: 'UPI' | 'PAY_LATER';
+  }
+): Promise<{ isFullyBacked: boolean; pool: PlayerPool }> {
+  const poolRef = doc(db, 'playerPools', poolId);
+  const now = new Date().toISOString();
+
+  let isBacked = false;
+  let updatedPoolData: PlayerPool | null = null;
+
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(poolRef);
+    if (!snap.exists()) throw new Error('Player pool does not exist');
+    const pool = snap.data() as PlayerPool;
+
+    if (pool.status === 'CONVERTED_TO_LOBBY') {
+      throw new Error('This pool has already been converted into an active match lobby.');
+    }
+
+    const existingPlayers = pool.interestedPlayers || [];
+    if (existingPlayers.some((p) => p.uid === player.uid)) {
+      updatedPoolData = pool;
+      return; // Already in pool
+    }
+
+    const newPlayers = [
+      ...existingPlayers,
+      {
+        uid: player.uid,
+        name: player.name,
+        phone: player.phone,
+        photoURL: player.photoURL,
+        skillLevel: player.skillLevel || 'Athlete',
+        paymentPreference: player.paymentPreference || 'UPI',
+        joinedAt: now,
+      },
+    ];
+
+    const newCount = newPlayers.length;
+    isBacked = newCount >= pool.requiredPlayers;
+    const nextStatus = isBacked ? 'READY_TO_CONVERT' : 'OPEN';
+
+    tx.update(poolRef, sanitizeData({
+      currentPlayersCount: newCount,
+      interestedPlayers: newPlayers,
+      status: nextStatus,
+      updatedAt: now,
+    }));
+
+    updatedPoolData = {
+      ...pool,
+      currentPlayersCount: newCount,
+      interestedPlayers: newPlayers,
+      status: nextStatus,
+      updatedAt: now,
+    };
+  });
+
+  return { isFullyBacked: isBacked, pool: updatedPoolData! };
+}
+
+export async function leavePlayerPool(poolId: string, uid: string): Promise<void> {
+  const poolRef = doc(db, 'playerPools', poolId);
+  const now = new Date().toISOString();
+
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(poolRef);
+    if (!snap.exists()) return;
+    const pool = snap.data() as PlayerPool;
+
+    const updatedPlayers = (pool.interestedPlayers || []).filter((p) => p.uid !== uid);
+    const newCount = updatedPlayers.length;
+    const isBacked = newCount >= pool.requiredPlayers;
+
+    tx.update(poolRef, sanitizeData({
+      currentPlayersCount: newCount,
+      interestedPlayers: updatedPlayers,
+      status: isBacked ? 'READY_TO_CONVERT' : 'OPEN',
+      updatedAt: now,
+    }));
+  });
+}
+
+export async function deletePlayerPool(poolId: string, uid?: string): Promise<void> {
+  const poolRef = doc(db, 'playerPools', poolId);
+  const snap = await getDoc(poolRef);
+  if (snap.exists()) {
+    const data = snap.data() as PlayerPool;
+    if (uid && data.creatorId && data.creatorId !== uid) {
+      throw new Error('Only the creator of this squad pool can delete it.');
+    }
+  }
+  await deleteDoc(poolRef);
+}
+
+export function getLocalDateString(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function parseTimeToMinutes(tStr?: string): number {
+  if (!tStr) return 0;
+  let str = tStr.trim();
+
+  // If time range is provided (e.g. "06:00 PM - 07:00 PM"), extract the final time
+  if (str.includes(' - ')) {
+    const segments = str.split(' - ');
+    str = segments[segments.length - 1].trim();
+  }
+
+  const isPM = /pm/i.test(str);
+  const isAM = /am/i.test(str);
+
+  // Strip non-digit and non-colon characters
+  const clean = str.replace(/[^\d:]/g, '');
+  const colonParts = clean.split(':');
+  let h = parseInt(colonParts[0], 10) || 0;
+  const m = parseInt(colonParts[1] || '0', 10) || 0;
+
+  if (isPM && h < 12) h += 12;
+  if (isAM && h === 12) h = 0;
+
+  return h * 60 + m;
+}
+
+export function isLobbyConcluded(lobby: {
+  date: string;
+  startTime?: string;
+  endTime?: string;
+  status?: string;
+}): boolean {
+  if (!lobby) return false;
+  const statusUpper = (lobby.status || '').toUpperCase();
+  if (
+    statusUpper === 'COMPLETED' ||
+    statusUpper === 'CLOSED' ||
+    statusUpper === 'CONCLUDED' ||
+    statusUpper === 'MATCH_CONCLUDED' ||
+    statusUpper === 'OVER' ||
+    statusUpper === 'FINISHED' ||
+    statusUpper === 'EXPIRED'
+  ) {
+    return true;
+  }
+  if (statusUpper === 'CANCELLED') return false;
+
+  const now = new Date();
+  const todayStr = getLocalDateString(now);
+
+  if (lobby.date < todayStr) {
+    return true;
+  }
+  if (lobby.date > todayStr) {
+    return false;
+  }
+
+  // Today: check end time in minutes
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const endMin = parseTimeToMinutes(lobby.endTime || '23:59');
+  return currentMinutes >= endMin;
+}
+
+export function getLobbyGameStatus(lobby: {
+  date: string;
+  startTime: string;
+  endTime: string;
+  status?: string;
+}): 'UPCOMING' | 'LIVE' | 'OVER' | 'CANCELLED' {
+  if (!lobby) return 'OVER';
+  const statusUpper = (lobby.status || '').toUpperCase();
+  if (statusUpper === 'CANCELLED') return 'CANCELLED';
+  if (statusUpper === 'MATCH_STARTED') return 'LIVE';
+  if (
+    statusUpper === 'COMPLETED' ||
+    statusUpper === 'CLOSED' ||
+    statusUpper === 'CONCLUDED' ||
+    statusUpper === 'MATCH_CONCLUDED' ||
+    statusUpper === 'OVER' ||
+    statusUpper === 'FINISHED' ||
+    statusUpper === 'EXPIRED'
+  ) {
+    return 'OVER';
+  }
+
+  const now = new Date();
+  const todayStr = getLocalDateString(now);
+
+  if (lobby.date < todayStr) {
+    return 'OVER';
+  }
+  if (lobby.date > todayStr) {
+    return 'UPCOMING';
+  }
+
+  // Today: check start and end time
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const startMin = parseTimeToMinutes(lobby.startTime || '00:00');
+  const endMin = parseTimeToMinutes(lobby.endTime || '23:59');
+
+  if (currentMinutes >= endMin) {
+    return 'OVER';
+  }
+  if (currentMinutes >= startMin && currentMinutes < endMin) {
+    return 'LIVE';
+  }
+  return 'UPCOMING';
+}
+
+// ==================== POOL-TO-LOBBY AUTO CONVERSION ====================
+
+export async function convertPoolToLobby(
+  poolId: string
+): Promise<{ lobbyId: string; bookingId: string; turfName: string }> {
+  const poolRef = doc(db, 'playerPools', poolId);
+  const poolSnap = await getDoc(poolRef);
+
+  if (!poolSnap.exists()) {
+    throw new Error('Player Pool does not exist.');
+  }
+
+  const pool = poolSnap.data() as PlayerPool;
+  if (pool.status === 'CONVERTED_TO_LOBBY' && pool.convertedLobbyId) {
+    return {
+      lobbyId: pool.convertedLobbyId,
+      bookingId: pool.convertedBookingId || '',
+      turfName: pool.convertedTurfName || 'Sports Arena',
+    };
+  }
+
+  const now = new Date().toISOString();
+  const allTurfs = await getTurfs();
+
+  // Find candidate turf matching preferred city or preferredTurfId
+  let assignedTurf = allTurfs.find((t) => t.id === pool.preferredTurfId);
+  if (!assignedTurf) {
+    assignedTurf = allTurfs.find(
+      (t) =>
+        t.city?.toLowerCase() === pool.city?.toLowerCase() &&
+        t.sports?.some((s) => s.toLowerCase() === pool.sport.toLowerCase())
+    );
+  }
+  if (!assignedTurf && allTurfs.length > 0) {
+    assignedTurf = allTurfs[0];
+  }
+  if (!assignedTurf) {
+    throw new Error('No available turf venues found in this region to assign to the lobby.');
+  }
+
+  const arenas = await getArenasByTurf(assignedTurf.id);
+  const assignedArena =
+    arenas.find((a) => a.sport.toLowerCase() === pool.sport.toLowerCase()) ||
+    arenas[0] || {
+      id: 'arena-main',
+      turfId: assignedTurf.id,
+      ownerId: assignedTurf.ownerId,
+      name: `${pool.sport} Arena`,
+      sport: pool.sport,
+      description: 'Main Turf Arena',
+      capacity: pool.requiredPlayers + 4,
+      pricePerSlot: pool.requiredPlayers * pool.maxPricePerPlayer,
+      photos: [],
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+  // Find an available slot or create one
+  const targetDate = pool.preferredDate || now.split('T')[0];
+  let slots = await getSlotsByArenaAndDate(assignedArena.id, targetDate);
+  let assignedSlot = slots.find((s) => s.status === 'AVAILABLE');
+
+  const slotPrice = assignedSlot?.price || pool.requiredPlayers * pool.maxPricePerPlayer;
+  const startTime = assignedSlot?.startTime || pool.preferredTime || '07:00 PM';
+  const endTime = assignedSlot?.endTime || '08:00 PM';
+  const slotId = assignedSlot?.id || `auto-slot-${Date.now()}`;
+
+  // Execute lobby & booking creation
+  const newBookingRef = doc(collection(db, 'bookings'));
+  const newLobbyRef = doc(collection(db, 'lobbies'));
+  const lobbyId = newLobbyRef.id;
+  const bookingId = newBookingRef.id;
+  const bookingCode = `TF-POOL-${Math.floor(100000 + Math.random() * 900000)}`;
+
+  const poolPlayers = pool.interestedPlayers || [];
+  const maxPlayersQuota = pool.requiredPlayers + 4;
+  const minPlayersQuota = pool.requiredPlayers;
+  const currentCount = poolPlayers.length;
+  const dynamicCost = Math.round(slotPrice / Math.max(1, currentCount));
+
+  // Prepare participants roster
+  const lobbyPlayersList = poolPlayers.map((p, idx) => ({
+    playerId: p.uid,
+    uid: p.uid,
+    playerName: p.name,
+    playerPhotoURL: p.photoURL || null,
+    isHost: p.uid === pool.creatorId || idx === 0,
+    paymentMethod: p.paymentPreference === 'PAY_LATER' ? ('PAY_LATER_AT_TURF' as const) : ('PAY_NOW' as const),
+    paymentStatus: p.paymentPreference === 'PAY_LATER' ? ('DUE' as const) : ('PAID' as const),
+    amountPaid: p.paymentPreference === 'PAY_LATER' ? 0 : pool.maxPricePerPlayer,
+    amountDue: p.paymentPreference === 'PAY_LATER' ? pool.maxPricePerPlayer : 0,
+    upiTxnRef: p.paymentPreference === 'PAY_LATER' ? undefined : `UPI-POOL-${Date.now()}-${idx}`,
+    joinedAt: now,
+  }));
+
+  const playerUids = poolPlayers.map((p) => p.uid);
+
+  // Booking payload
+  const bookingData = {
+    id: bookingId,
+    bookingId: bookingCode,
+    playerId: pool.creatorId,
+    playerName: pool.creatorName,
+    playerEmail: '',
+    playerPhone: pool.creatorPhone || '',
+    playerPhotoURL: pool.creatorPhotoURL || null,
+    ownerId: assignedTurf.ownerId,
+    turfId: assignedTurf.id,
+    turfName: assignedTurf.name,
+    turfAddress: assignedTurf.address || 'Sports Arena',
+    turfArea: assignedTurf.area || '',
+    turfCity: assignedTurf.city || pool.city,
+    arenaId: assignedArena.id,
+    arenaName: assignedArena.name,
+    sport: pool.sport,
+    slotId: slotId,
+    date: targetDate,
+    day: 'Match Day',
+    startTime: startTime,
+    endTime: endTime,
+    duration: 60,
+    totalAmount: slotPrice,
+    amountPaid: pool.maxPricePerPlayer * poolPlayers.filter((p) => p.paymentPreference !== 'PAY_LATER').length,
+    amountDue: pool.maxPricePerPlayer * poolPlayers.filter((p) => p.paymentPreference === 'PAY_LATER').length,
+    paymentStatus: 'PARTIALLY_PAID',
+    bookingStatus: 'CONFIRMED',
+    bookingType: 'PLAYER',
+    paymentMethod: 'PAY_NOW',
+    numberOfPlayers: maxPlayersQuota,
+    playerShareAmount: pool.maxPricePerPlayer,
+    lobbyCreated: true,
+    lobbyId: lobbyId,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  // Lobby payload
+  const lobbyData = {
+    id: lobbyId,
+    name: `${pool.sport} Squad Match at ${assignedTurf.name}`,
+    sport: pool.sport,
+    turfId: assignedTurf.id,
+    turfName: assignedTurf.name,
+    turfAddress: assignedTurf.address || 'Sports Turf',
+    turfCity: assignedTurf.city || pool.city,
+    arenaId: assignedArena.id,
+    arenaName: assignedArena.name,
+    bookingId: bookingId,
+    slotId: slotId,
+    hostId: pool.creatorId,
+    hostName: pool.creatorName,
+    hostPhotoURL: pool.creatorPhotoURL || null,
+    date: targetDate,
+    day: 'Match Day',
+    startTime: startTime,
+    endTime: endTime,
+    maxPlayers: maxPlayersQuota,
+    minPlayers: minPlayersQuota,
+    currentPlayers: currentCount,
+    pricePerPlayer: pool.maxPricePerPlayer,
+    totalSlotPrice: slotPrice,
+    dynamicCostPerPlayer: dynamicCost,
+    description: `Auto-converted from community athlete pool. Fully-backed squad ready for kickoff!`,
+    rules: 'Arrive 10 mins before start. Turf shoes mandatory.',
+    isPublic: true,
+    allowNewPlayers: true,
+    status: currentCount >= maxPlayersQuota ? 'FULL' : 'OPEN',
+    playerUids: playerUids,
+    players: lobbyPlayersList,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await setDoc(newBookingRef, sanitizeData(bookingData));
+  await setDoc(newLobbyRef, sanitizeData(lobbyData));
+
+  // Lock slot in Firestore
+  if (slotId && !slotId.startsWith('auto-slot-')) {
+    try {
+      await updateDoc(doc(db, 'slots', slotId), sanitizeData({
+        status: 'BOOKED_BY_PLAYER',
+        bookingType: 'PLAYER',
+        bookedByPlayerId: pool.creatorId,
+        bookedByPlayerName: pool.creatorName,
+        activeBookingId: bookingId,
+        updatedAt: now,
+      }));
+    } catch (sErr) {
+      console.warn('Error locking slot for pool conversion:', sErr);
+    }
+  }
+
+  // Create lobby player records
+  for (const lp of lobbyPlayersList) {
+    const pId = `${lobbyId}_${lp.uid}`;
+    await setDoc(
+      doc(db, 'lobbyPlayers', pId),
+      sanitizeData({
+        id: pId,
+        lobbyId: lobbyId,
+        uid: lp.uid,
+        playerName: lp.playerName,
+        playerPhotoURL: lp.playerPhotoURL,
+        isHost: lp.isHost,
+        paymentMethod: lp.paymentMethod,
+        paymentStatus: lp.paymentStatus,
+        amountPaid: lp.amountPaid,
+        amountDue: lp.amountDue,
+        remainingAmount: lp.amountDue,
+        upiTxnRef: lp.upiTxnRef,
+        joinedAt: now,
+      })
+    );
+
+    // Send in-app notification to all squad athletes
+    await addDoc(collection(db, 'notifications'), {
+      recipientId: lp.uid,
+      title: 'Squad Pool Converted to Live Lobby!',
+      message: `Your ${pool.sport} squad is fully backed! A turf slot has been confirmed at ${assignedTurf.name} on ${targetDate} (${startTime}).`,
+      type: 'LOBBY',
+      relatedId: lobbyId,
+      relatedType: 'LOBBY',
+      isRead: false,
+      createdAt: now,
+    });
+  }
+
+  // Update Player Pool doc status
+  await updateDoc(poolRef, {
+    status: 'CONVERTED_TO_LOBBY',
+    convertedLobbyId: lobbyId,
+    convertedBookingId: bookingId,
+    convertedTurfName: assignedTurf.name,
+    updatedAt: now,
+  });
+
+  return {
+    lobbyId,
+    bookingId,
+    turfName: assignedTurf.name,
+  };
 }
 
 export async function deleteLobby(lobbyId: string, hostUid: string): Promise<void> {
@@ -863,11 +1674,51 @@ export async function getActiveOffers(): Promise<Offer[]> {
   }
 }
 
+export async function getActiveOffersByTurf(turfId: string): Promise<Offer[]> {
+  try {
+    const colRef = collection(db, 'offers');
+    const q = query(colRef, where('active', '==', true));
+    const snap = await getDocs(q);
+    const today = new Date().toISOString().split('T')[0];
+    return snap.docs
+      .map((d) => ({ id: d.id, ...d.data() } as Offer))
+      .filter(
+        (o) =>
+          (o.turfId === 'ALL' || o.turfId === turfId) &&
+          (!o.endDate || o.endDate >= today) &&
+          (!o.usageLimit || (o.usedCount || 0) < o.usageLimit)
+      );
+  } catch (err) {
+    console.warn('Error fetching active offers by turf:', err);
+    return [];
+  }
+}
+
+export async function getAllActiveOffers(): Promise<Offer[]> {
+  try {
+    const colRef = collection(db, 'offers');
+    const q = query(colRef, where('active', '==', true));
+    const snap = await getDocs(q);
+    const today = new Date().toISOString().split('T')[0];
+    return snap.docs
+      .map((d) => ({ id: d.id, ...d.data() } as Offer))
+      .filter(
+        (o) =>
+          (!o.endDate || o.endDate >= today) &&
+          (!o.usageLimit || (o.usedCount || 0) < o.usageLimit)
+      );
+  } catch (err) {
+    console.warn('Error fetching all active offers:', err);
+    return [];
+  }
+}
+
 export async function createOffer(offerData: {
   title: string;
   description: string;
   code: string;
   discountPercent: number;
+  usageLimit?: number;
   turfId: string;
   turfName: string;
   validUntil: string;
@@ -887,6 +1738,7 @@ export async function createOffer(offerData: {
     discountValue: offerData.discountPercent,
     startDate: now.split('T')[0],
     endDate: offerData.validUntil,
+    usageLimit: offerData.usageLimit || 50,
     usedCount: 0,
     active: offerData.active,
     createdAt: now,
@@ -894,6 +1746,92 @@ export async function createOffer(offerData: {
   };
   await setDoc(docRef, sanitizeData(payload));
   return docRef.id;
+}
+
+export async function validateAndApplyOffer(
+  code: string,
+  bookingAmount: number,
+  turfId: string,
+  arenaId?: string
+): Promise<{
+  valid: boolean;
+  message?: string;
+  offer?: Offer;
+  discountAmount: number;
+  finalAmount: number;
+}> {
+  if (!code || !code.trim()) {
+    return { valid: false, message: 'Please enter a coupon code.', discountAmount: 0, finalAmount: bookingAmount };
+  }
+
+  const cleanCode = code.trim().toUpperCase();
+  const offersRef = collection(db, 'offers');
+  const q = query(offersRef, where('code', '==', cleanCode));
+  const snap = await getDocs(q);
+
+  if (snap.empty) {
+    return { valid: false, message: 'Invalid promo code. Please check and try again.', discountAmount: 0, finalAmount: bookingAmount };
+  }
+
+  const offerDoc = snap.docs[0];
+  const offer = { id: offerDoc.id, ...offerDoc.data() } as Offer;
+
+  if (!offer.active) {
+    return { valid: false, message: 'This promo code has been deactivated.', discountAmount: 0, finalAmount: bookingAmount };
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+  if (offer.startDate && today < offer.startDate) {
+    return { valid: false, message: `Promo code is not yet active. Valid from ${offer.startDate}.`, discountAmount: 0, finalAmount: bookingAmount };
+  }
+  if (offer.endDate && today > offer.endDate) {
+    return { valid: false, message: `Promo code expired on ${offer.endDate}.`, discountAmount: 0, finalAmount: bookingAmount };
+  }
+
+  if (offer.turfId !== 'ALL' && offer.turfId !== turfId) {
+    return { valid: false, message: 'This promo code is not applicable for this turf.', discountAmount: 0, finalAmount: bookingAmount };
+  }
+
+  if (offer.arenaId && offer.arenaId !== 'ALL' && arenaId && offer.arenaId !== arenaId) {
+    return { valid: false, message: 'This promo code is not applicable for this arena/gaming zone.', discountAmount: 0, finalAmount: bookingAmount };
+  }
+
+  if (offer.usageLimit && (offer.usedCount || 0) >= offer.usageLimit) {
+    return { valid: false, message: `This promo code has reached its maximum usage limit of ${offer.usageLimit} redemptions.`, discountAmount: 0, finalAmount: bookingAmount };
+  }
+
+  let discount = 0;
+  if (offer.discountType === 'PERCENTAGE') {
+    discount = (bookingAmount * offer.discountValue) / 100;
+  } else {
+    discount = offer.discountValue;
+  }
+
+  discount = Math.min(discount, bookingAmount);
+  const finalAmount = Math.max(0, bookingAmount - discount);
+
+  return {
+    valid: true,
+    offer,
+    discountAmount: Math.round(discount),
+    finalAmount: Math.round(finalAmount),
+  };
+}
+
+export async function incrementOfferUsage(offerId: string): Promise<void> {
+  try {
+    const offerRef = doc(db, 'offers', offerId);
+    const snap = await getDoc(offerRef);
+    if (snap.exists()) {
+      const o = snap.data() as Offer;
+      await updateDoc(offerRef, {
+        usedCount: (o.usedCount || 0) + 1,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.warn('Failed to increment offer usage:', err);
+  }
 }
 
 // ==================== NOTIFICATIONS ====================
@@ -909,7 +1847,7 @@ export async function getUserNotifications(userId: string): Promise<InAppNotific
         {
           id: 'welcome_1',
           recipientId: userId,
-          title: 'Welcome to TruFit Sports!',
+          title: 'Welcome to TurFit Sports!',
           message: 'Explore world-class turfs, join pick-up lobbies, and book with instant confirmation.',
           type: 'GENERAL',
           isRead: false,
@@ -946,6 +1884,24 @@ export async function markNotificationAsRead(notificationId: string): Promise<vo
   }
 }
 
+export async function sendNotification(
+  params: Omit<InAppNotification, 'id' | 'createdAt' | 'isRead'>
+): Promise<string> {
+  return sendPushNotification({
+    recipientId: params.recipientId,
+    title: params.title,
+    message: params.message,
+    type: params.type,
+    relatedId: params.relatedId,
+    relatedType: params.relatedType,
+    linkId: params.linkId,
+    senderId: params.senderId,
+    senderName: params.senderName,
+  });
+}
+
+export { sendPushNotification } from './pushNotificationService';
+
 // ==================== REWARDS & WALLET ====================
 
 export async function getUserRewardWallet(userId: string): Promise<UserRewardWallet> {
@@ -964,4 +1920,16 @@ export async function getUserRewardWallet(userId: string): Promise<UserRewardWal
   await setDoc(docRef, sanitizeData(initial));
   return initial;
 }
+
+// ==================== POST-MATCH PLAYER RATINGS & STATS ====================
+
+export {
+  submitPlayerRating,
+  checkHasRatedPlayer,
+  getPlayerRatingsList,
+  getPlayerSportsmanshipStats,
+} from './playerRatingService';
+export type { SubmitPlayerRatingParams } from './playerRatingService';
+
+
 

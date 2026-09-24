@@ -11,13 +11,16 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
+import { useOwnerSubscription } from '../../contexts/OwnerSubscriptionContext';
+import { SubscriptionFeatureGate } from '../../components/SubscriptionFeatureGate';
 import { getOffers, createOffer } from '../../services/communityService';
 import { getOwnerTurfs } from '../../services/dbService';
 import { Offer, Turf } from '../../types';
 import { Tag, Plus, X, Percent, Calendar } from 'lucide-react-native';
 
-export const OwnerOffersScreen: React.FC = () => {
+export const OwnerOffersScreen: React.FC<{ navigation?: any }> = ({ navigation }) => {
   const { user } = useAuth();
+  const { canAccess, plan } = useOwnerSubscription();
   const [offers, setOffers] = useState<Offer[]>([]);
   const [turfs, setTurfs] = useState<Turf[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -26,11 +29,14 @@ export const OwnerOffersScreen: React.FC = () => {
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
   const [discountPercent, setDiscountPercent] = useState('20');
+  const [usageLimit, setUsageLimit] = useState('50');
   const [selectedTurf, setSelectedTurf] = useState<Turf | null>(null);
   const [creating, setCreating] = useState(false);
 
+  const hasAccess = canAccess('offers');
+
   const loadData = async () => {
-    if (!user) return;
+    if (!user || !hasAccess) return;
     try {
       const [oData, tData] = await Promise.all([
         getOffers(),
@@ -45,8 +51,28 @@ export const OwnerOffersScreen: React.FC = () => {
   };
 
   useEffect(() => {
-    loadData();
-  }, [user]);
+    if (hasAccess) {
+      loadData();
+    }
+  }, [user, hasAccess]);
+
+  if (!hasAccess) {
+    return (
+      <SubscriptionFeatureGate
+        featureKey="offers"
+        featureTitle="Custom Promo Codes & Discount Engine"
+        featureDescription="Create custom coupon codes, seasonal flash discounts, and weekday promotional campaign tags for players."
+        requiredPlanName={plan?.name || 'Pro Annual'}
+        benefits={[
+          'Create unlimited promotional coupons with percentage off',
+          'Target specific pitches, weekdays, or off-peak afternoon slots',
+          'Automated validation during checkout in the player mobile app',
+          'Real-time redemption counting and ROI analytics',
+        ]}
+        navigation={navigation}
+      />
+    );
+  }
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -63,6 +89,7 @@ export const OwnerOffersScreen: React.FC = () => {
         description: `${discountPercent}% off on turf bookings`,
         code: code.trim().toUpperCase(),
         discountPercent: parseInt(discountPercent) || 20,
+        usageLimit: parseInt(usageLimit) || 50,
         turfId: selectedTurf.id,
         turfName: selectedTurf.name,
         validUntil: '2026-12-31',
@@ -71,6 +98,8 @@ export const OwnerOffersScreen: React.FC = () => {
       setShowModal(false);
       setTitle('');
       setCode('');
+      setDiscountPercent('20');
+      setUsageLimit('50');
       loadData();
     } catch (err) {
       console.warn('Error creating offer:', err);
@@ -110,8 +139,16 @@ export const OwnerOffersScreen: React.FC = () => {
             </View>
 
             <View style={styles.codeRow}>
-              <Text style={styles.codeLabel}>PROMO CODE:</Text>
-              <Text style={styles.codeText}>{item.code}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.codeLabel}>PROMO CODE:</Text>
+                <Text style={styles.codeText}>{item.code}</Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={styles.codeLabel}>USAGE LIMIT:</Text>
+                <Text style={{ fontSize: 12, fontWeight: '700', color: '#10b981' }}>
+                  {item.usedCount || 0} / {item.usageLimit || 50} redeemed
+                </Text>
+              </View>
             </View>
           </View>
         )}
@@ -147,7 +184,7 @@ export const OwnerOffersScreen: React.FC = () => {
             <Text style={styles.label}>Offer Title</Text>
             <TextInput
               style={styles.input}
-              placeholder="e.g. Weekend Flash Sale"
+              placeholder="e.g. Festival Special Discount"
               placeholderTextColor="#64748b"
               value={title}
               onChangeText={setTitle}
@@ -156,7 +193,7 @@ export const OwnerOffersScreen: React.FC = () => {
             <Text style={styles.label}>Coupon Code</Text>
             <TextInput
               style={styles.input}
-              placeholder="e.g. TRU20"
+              placeholder="e.g. TURFPROMO"
               placeholderTextColor="#64748b"
               value={code}
               onChangeText={setCode}
@@ -169,6 +206,16 @@ export const OwnerOffersScreen: React.FC = () => {
               keyboardType="numeric"
               value={discountPercent}
               onChangeText={setDiscountPercent}
+            />
+
+            <Text style={styles.label}>Usage Limit (Max Redemptions)</Text>
+            <TextInput
+              style={styles.input}
+              keyboardType="numeric"
+              placeholder="e.g. 50"
+              placeholderTextColor="#64748b"
+              value={usageLimit}
+              onChangeText={setUsageLimit}
             />
 
             <TouchableOpacity

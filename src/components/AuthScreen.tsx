@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -14,6 +14,7 @@ import { useAuth } from '../context/AuthContext';
 import { UserRole, UserProfile } from '../types';
 import { sanitizeFirestoreData } from '../lib/utils';
 import { ADMIN_EMAILS, isUserAdmin } from '../lib/authUtils';
+import { getAppConfig, updateAppConfig } from '../lib/db';
 import {
   ShieldCheck,
   Mail,
@@ -29,18 +30,23 @@ import {
   Building,
   CheckCircle2,
   Shield,
+  Smartphone,
+  Eye,
+  EyeOff,
+  Loader2,
+  ArrowLeft,
 } from 'lucide-react';
 
 interface AuthModalProps {
   initialRole?: UserRole;
+  onBackToLanding?: () => void;
 }
 
-export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' }) => {
+export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER', onBackToLanding }) => {
   const { user, profile, emailVerified, refreshUser, resendVerification, logout } = useAuth();
 
   const [isLogin, setIsLogin] = useState<boolean>(true);
   const [role, setRole] = useState<UserRole>(initialRole);
-  const [isAdminLoginMode, setIsAdminLoginMode] = useState<boolean>(false);
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
@@ -58,6 +64,55 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
   const [resending, setResending] = useState<boolean>(false);
   const [resetSent, setResetSent] = useState<boolean>(false);
 
+  // Admin-controlled player login visibility on website
+  const [allowPlayerLoginOnWebsite, setAllowPlayerLoginOnWebsite] = useState<boolean>(false);
+  const [configLoaded, setConfigLoaded] = useState<boolean>(false);
+  const [togglingLogin, setTogglingLogin] = useState<boolean>(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    getAppConfig()
+      .then((cfg) => {
+        if (isMounted) {
+          const allowed = !!cfg.allowPlayerLoginOnWebsite;
+          setAllowPlayerLoginOnWebsite(allowed);
+          if (!allowed && role === 'PLAYER') {
+            setRole('OWNER');
+          }
+          setConfigLoaded(true);
+        }
+      })
+      .catch((err) => {
+        console.warn('Config fetch note on AuthScreen:', err);
+        if (isMounted) setConfigLoaded(true);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const handleAdminTogglePlayerLogin = async () => {
+    setTogglingLogin(true);
+    const nextVal = !allowPlayerLoginOnWebsite;
+    try {
+      await updateAppConfig({ allowPlayerLoginOnWebsite: nextVal });
+      setAllowPlayerLoginOnWebsite(nextVal);
+      if (!nextVal && role === 'PLAYER') {
+        setRole('OWNER');
+      }
+      setInfoMsg(
+        nextVal
+          ? 'Player Login is now enabled on the website.'
+          : 'Player Login is now hidden on the website (Mobile App only).'
+      );
+    } catch (err: any) {
+      console.error('Failed to toggle player login:', err);
+      setErrorMsg('Failed to toggle player login setting.');
+    } finally {
+      setTogglingLogin(false);
+    }
+  };
+
   // If user is logged in but unverified, render the mandatory verification screen
   if (user && !emailVerified) {
     return (
@@ -71,7 +126,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
 
           <h2 className="text-2xl font-bold text-center mb-2">Verify Your Email</h2>
           <p className="text-slate-300 text-sm text-center mb-6">
-            Please verify your email before continuing to TruFit. We sent a verification link to:
+            Please verify your email before continuing to TurFit. We sent a verification link to:
           </p>
 
           <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-center mb-6">
@@ -157,8 +212,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
     setGoogleLoading(true);
 
     try {
-      const targetRole = isAdminLoginMode ? 'ADMIN' : role;
-      localStorage.setItem('pending_role', targetRole);
+      localStorage.setItem('pending_role', role);
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
       const result = await signInWithPopup(auth, provider);
@@ -172,7 +226,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
         const userSnap = await getDoc(userDocRef);
 
         if (!userSnap.exists()) {
-          const finalRole: UserRole = userIsAdmin ? 'ADMIN' : targetRole;
+          const finalRole: UserRole = userIsAdmin ? 'ADMIN' : role;
           const profilePayload: Record<string, any> = {
             uid: fbUser.uid,
             email: fbUser.email || '',
@@ -186,9 +240,13 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
           };
           if (finalRole === 'PLAYER' && preferredSport) {
             profilePayload.preferredSport = preferredSport;
+            profilePayload.isOwnerRegistered = false;
           }
-          if (finalRole === 'OWNER') {
-            profilePayload.businessName = businessName.trim() || `${fbUser.displayName || 'Owner'}'s Turf`;
+          if (finalRole === 'OWNER' || userIsAdmin) {
+            profilePayload.isOwnerRegistered = true;
+            if (finalRole === 'OWNER') {
+              profilePayload.businessName = businessName.trim() || `${fbUser.displayName || 'Owner'}'s Turf`;
+            }
           }
           await setDoc(userDocRef, sanitizeFirestoreData(profilePayload), { merge: true });
         }
@@ -211,95 +269,82 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
     e.preventDefault();
     setErrorMsg(null);
     setInfoMsg(null);
+
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !password) {
+      setErrorMsg('Please enter both email and password.');
+      return;
+    }
+
     setLoading(true);
 
     try {
-      const targetRole = isAdminLoginMode ? 'ADMIN' : role;
-
       if (isLogin) {
-        await signInWithEmailAndPassword(auth, email.trim(), password);
+        await signInWithEmailAndPassword(auth, cleanEmail, password);
       } else {
-        // Sign Up
         if (password !== confirmPassword) {
-          throw new Error('Passwords do not match.');
+          setErrorMsg('Passwords do not match.');
+          setLoading(false);
+          return;
         }
         if (password.length < 6) {
-          throw new Error('Password must be at least 6 characters.');
-        }
-        if (!displayName.trim()) {
-          throw new Error('Full Name is required.');
-        }
-
-        // Save role intent in local storage in case profile doc write lags
-        localStorage.setItem('pending_role', targetRole);
-
-        const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-        const fbUser = credential.user;
-
-        // Update display name
-        try {
-          await updateProfile(fbUser, {
-            displayName: displayName.trim(),
-          });
-        } catch (profileErr) {
-          console.warn('Could not update display name in auth:', profileErr);
+          setErrorMsg('Password must be at least 6 characters long.');
+          setLoading(false);
+          return;
         }
 
-        // Send verification email immediately
+        const userCred = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+        const fbUser = userCred.user;
+        const userIsAdmin = isUserAdmin(fbUser, null);
+        const finalRole: UserRole = userIsAdmin ? 'ADMIN' : role;
+
         try {
           await sendEmailVerification(fbUser);
-        } catch (emailErr) {
-          console.warn('Could not send email verification link:', emailErr);
+        } catch (vErr) {
+          console.warn('Verification email note:', vErr);
         }
 
-        // Create Firestore profile with sanitized data
-        try {
-          const userDocRef = doc(db, 'users', fbUser.uid);
-          const userIsAdmin = isUserAdmin(fbUser, null);
-          const finalRole: UserRole = userIsAdmin ? 'ADMIN' : targetRole;
+        const userDocRef = doc(db, 'users', fbUser.uid);
+        const profilePayload: Record<string, any> = {
+          uid: fbUser.uid,
+          email: cleanEmail,
+          displayName: displayName.trim() || cleanEmail.split('@')[0] || 'Athlete',
+          role: finalRole,
+          photoURL: '',
+          city: city.trim() || 'Mumbai',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
 
-          const newProfile: Record<string, any> = {
-            uid: fbUser.uid,
-            email: fbUser.email || email.trim(),
-            displayName: displayName.trim(),
-            role: finalRole,
-            emailVerified: false,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          };
-
-          if (phoneNumber.trim()) {
-            newProfile.phoneNumber = phoneNumber.trim();
-          }
-          if (city.trim()) {
-            newProfile.city = city.trim();
-          }
-          if (finalRole === 'PLAYER' && preferredSport) {
-            newProfile.preferredSport = preferredSport;
-          }
+        if (finalRole === 'PLAYER') {
+          profilePayload.preferredSport = preferredSport || 'Football';
+          profilePayload.isOwnerRegistered = false;
+        }
+        if (finalRole === 'OWNER' || userIsAdmin) {
+          profilePayload.isOwnerRegistered = true;
           if (finalRole === 'OWNER') {
-            newProfile.businessName = businessName.trim() || displayName.trim();
+            profilePayload.businessName = businessName.trim() || `${displayName.trim() || 'Owner'}'s Turf`;
           }
-
-          await setDoc(userDocRef, sanitizeFirestoreData(newProfile), { merge: true });
-        } catch (firestoreErr) {
-          console.warn('Firestore profile save note:', firestoreErr);
         }
-        setInfoMsg('Account created successfully! Verification email has been sent.');
+
+        await setDoc(userDocRef, sanitizeFirestoreData(profilePayload), { merge: true });
+        setInfoMsg('Account created! Verification link sent to your email.');
       }
     } catch (err: any) {
       console.error('Auth error:', err);
       let message = err.message || 'Authentication failed. Please check your credentials.';
       if (err.code === 'auth/operation-not-allowed') {
-        message = 'Email & Password authentication is disabled in this Firebase project. Please click "Continue with Google" above for instant 1-click access.';
+        message = 'Email & Password authentication is disabled in Firebase. Please click "Continue with Google" above.';
       } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
-        message = 'Invalid email or password. Please verify and try again.';
+        message = isLogin
+          ? 'Invalid email or password. If you don\'t have an account yet, click "Create Account" below or use "Continue with Google".'
+          : 'Invalid authentication credentials. Please try again or use Google sign-in.';
       } else if (err.code === 'auth/email-already-in-use') {
-        message = 'This email is already registered. Please log in or use Google Sign-In instead.';
+        message = 'An account with this email already exists. Switch to "Sign In" or reset your password.';
       } else if (err.code === 'auth/invalid-email') {
         message = 'Please provide a valid email address.';
       } else if (err.code === 'auth/weak-password') {
-        message = 'Password should be at least 6 characters.';
+        message = 'Password must be at least 6 characters.';
       }
       setErrorMsg(message);
     } finally {
@@ -336,43 +381,70 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
       <div className="absolute bottom-0 -right-20 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
 
       <div className="w-full max-w-md z-10">
+        {onBackToLanding && (
+          <div className="mb-4">
+            <button
+              type="button"
+              onClick={onBackToLanding}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/80 hover:bg-slate-800 border border-slate-800 text-xs font-semibold text-slate-300 hover:text-emerald-400 transition-colors cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Back to TruFit Website</span>
+            </button>
+          </div>
+        )}
+
         {/* Brand Header */}
         <div className="text-center mb-6">
-          <div className={`inline-flex items-center justify-center w-12 h-12 rounded-lg ${isAdminLoginMode ? 'bg-amber-600 shadow-amber-600/30' : 'bg-indigo-600 shadow-indigo-600/30'} text-white font-black text-2xl italic shadow-lg mb-3`}>
-            {isAdminLoginMode ? '🛡️' : 'TF'}
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-lg bg-indigo-600 shadow-indigo-600/30 text-white font-black text-2xl italic shadow-lg mb-3">
+            TF
           </div>
           <h1 className="text-3xl font-extrabold tracking-tight text-white flex items-center justify-center">
-            TRUFIT{' '}
-            <span className={`${isAdminLoginMode ? 'text-amber-400' : 'text-indigo-500'} font-medium text-sm ml-2 tracking-widest uppercase`}>
-              {isAdminLoginMode ? 'Admin Portal' : 'Portal'}
+            TURFIT{' '}
+            <span className="text-indigo-500 font-medium text-sm ml-2 tracking-widest uppercase">
+              Portal
             </span>
           </h1>
           <p className="text-slate-400 text-sm mt-1">
-            {isAdminLoginMode
-              ? 'Authorized Staff & Operations Console Login'
-              : 'Real Sports Turf Discovery & Slot Booking'}
+            Real Sports Turf Discovery & Slot Booking
           </p>
         </div>
 
         {/* Card */}
-        <div className={`bg-slate-900 border ${isAdminLoginMode ? 'border-amber-500/40 shadow-amber-950/30' : 'border-slate-800'} rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl`}>
-          {isAdminLoginMode ? (
-            /* Admin Portal Banner */
-            <div className="bg-amber-950/40 border border-amber-500/30 rounded-xl p-3.5 mb-5 text-center">
-              <div className="flex items-center justify-center gap-2 text-amber-400 font-bold text-xs uppercase tracking-wider mb-1">
-                <ShieldCheck className="w-4 h-4" />
-                <span>Super Admin & Operations Access</span>
-              </div>
-              <p className="text-slate-300 text-xs">
-                Staff account identified as: <span className="font-mono text-amber-300 font-semibold">ayusiv189@gmail.com</span>
-              </p>
-            </div>
-          ) : (
-            /* Standard Role selector for session setup */
-            <div className="mb-5">
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl">
+          {/* Standard Role selector for session setup with Admin Show/Hide Toggle */}
+          <div className="mb-5">
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
                 Select Account Type:
               </label>
+
+              {/* Admin Hide/Show Toggle Button */}
+              <button
+                type="button"
+                id="admin-toggle-player-web-btn"
+                onClick={handleAdminTogglePlayerLogin}
+                disabled={togglingLogin}
+                title="Admin control to toggle player login availability on the website"
+                className="text-[10px] font-bold text-slate-400 hover:text-amber-400 flex items-center gap-1 bg-slate-800/80 hover:bg-slate-800 px-2 py-0.5 rounded-md border border-slate-700 transition-colors cursor-pointer"
+              >
+                {togglingLogin ? (
+                  <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+                ) : allowPlayerLoginOnWebsite ? (
+                  <>
+                    <EyeOff className="w-3 h-3 text-amber-400" />
+                    <span>Admin: Hide Player Login</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="w-3 h-3 text-emerald-400" />
+                    <span>Admin: Show Player Login</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {allowPlayerLoginOnWebsite ? (
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
@@ -399,11 +471,32 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                   }`}
                 >
                   <Building className="w-5 h-5" />
-                  <span className="text-xs font-bold">Turf Owner</span>
+                  <span className="text-xs font-bold">Turf Owner / Admin</span>
                 </button>
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="space-y-2.5">
+                <button
+                  type="button"
+                  id="role-owner-select"
+                  onClick={() => setRole('OWNER')}
+                  className="w-full p-3 rounded-xl border border-indigo-500 bg-indigo-950/50 text-indigo-400 font-bold ring-1 ring-indigo-500/50 shadow-md shadow-indigo-950/30 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Building className="w-5 h-5" />
+                  <span className="text-xs font-bold">Turf Owner & Admin Portal</span>
+                </button>
+
+                {/* Notice directing players to mobile APK */}
+                <div className="bg-slate-950/80 border border-slate-800/80 rounded-xl p-2.5 flex items-start gap-2.5 text-slate-400">
+                  <Smartphone className="w-4 h-4 text-emerald-400 mt-0.5 flex-shrink-0" />
+                  <div className="text-[11px] leading-relaxed">
+                    <span className="text-slate-200 font-semibold">Players & Athletes: </span>
+                    Player login is optimized for the <span className="text-emerald-400 font-bold">TruFit Mobile App</span>. Use the mobile app to book slots and play matches.
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Primary Recommended: Google Sign-In */}
           <div className="mb-6">
@@ -436,7 +529,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                   />
                 </svg>
               )}
-              <span>{isAdminLoginMode ? 'Continue with Admin Google Account' : 'Continue with Google'}</span>
+              <span>Continue with Google</span>
             </button>
             <div className="flex items-center justify-center gap-1.5 mt-2 text-[11px] text-indigo-400">
               <CheckCircle2 className="w-3.5 h-3.5" />
@@ -450,42 +543,6 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
               Or with email
             </span>
             <div className="border-t border-slate-800 w-full" />
-          </div>
-
-          {/* Toggle Login vs Register */}
-          <div className="grid grid-cols-2 bg-slate-950 p-1 rounded-xl mb-6 border border-slate-800">
-            <button
-              id="tab-login-btn"
-              type="button"
-              onClick={() => {
-                setIsLogin(true);
-                setErrorMsg(null);
-                setInfoMsg(null);
-              }}
-              className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                isLogin
-                  ? isAdminLoginMode ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white shadow-md shadow-indigo-950/50'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Sign In
-            </button>
-            <button
-              id="tab-register-btn"
-              type="button"
-              onClick={() => {
-                setIsLogin(false);
-                setErrorMsg(null);
-                setInfoMsg(null);
-              }}
-              className={`py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                !isLogin
-                  ? isAdminLoginMode ? 'bg-amber-600 text-white' : 'bg-indigo-600 text-white shadow-md shadow-indigo-950/50'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Create Account
-            </button>
           </div>
 
           {errorMsg && (
@@ -502,98 +559,78 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
             </div>
           )}
 
+          {/* Sign In / Create Account Mode Toggle */}
+          <div className="flex border-b border-slate-800 mb-5">
+            <button
+              type="button"
+              id="mode-signin-btn"
+              onClick={() => {
+                setIsLogin(true);
+                setErrorMsg(null);
+                setInfoMsg(null);
+              }}
+              className={`flex-1 py-2.5 text-xs font-bold border-b-2 transition-colors cursor-pointer ${
+                isLogin
+                  ? 'border-indigo-500 text-indigo-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              id="mode-signup-btn"
+              onClick={() => {
+                setIsLogin(false);
+                setErrorMsg(null);
+                setInfoMsg(null);
+              }}
+              className={`flex-1 py-2.5 text-xs font-bold border-b-2 transition-colors cursor-pointer ${
+                !isLogin
+                  ? 'border-indigo-500 text-indigo-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Create Account
+            </button>
+          </div>
+
           <form onSubmit={handleAuthSubmit} className="space-y-4">
             {!isLogin && (
-              <>
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
-                    {role === 'OWNER' ? 'Owner Full Name' : 'Full Name'}
-                  </label>
-                  <div className="relative">
-                    <UserIcon className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
-                    <input
-                      id="input-fullname"
-                      type="text"
-                      required
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="e.g. Rahul Sharma"
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                    />
-                  </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  {role === 'OWNER' ? 'Business / Venue Owner Name' : 'Full Name / Display Name'}
+                </label>
+                <div className="relative">
+                  <UserIcon className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
+                  <input
+                    id="input-displayname"
+                    type="text"
+                    required={!isLogin}
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    placeholder={role === 'OWNER' ? 'e.g. Rahul Sharma (Venue Admin)' : 'e.g. Alex Morgan'}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
                 </div>
+              </div>
+            )}
 
-                {role === 'OWNER' && !isAdminLoginMode && (
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Business / Turf Brand Name
-                    </label>
-                    <div className="relative">
-                      <Building className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
-                      <input
-                        id="input-business-name"
-                        type="text"
-                        value={businessName}
-                        onChange={(e) => setBusinessName(e.target.value)}
-                        placeholder="e.g. TruFit Arena Mumbai"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">Phone</label>
-                    <div className="relative">
-                      <Phone className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
-                      <input
-                        id="input-phone"
-                        type="tel"
-                        value={phoneNumber}
-                        onChange={(e) => setPhoneNumber(e.target.value)}
-                        placeholder="+91 9876543210"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">City</label>
-                    <div className="relative">
-                      <MapPin className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
-                      <input
-                        id="input-city"
-                        type="text"
-                        value={city}
-                        onChange={(e) => setCity(e.target.value)}
-                        placeholder="e.g. Mumbai"
-                        className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                      />
-                    </div>
-                  </div>
+            {!isLogin && role === 'OWNER' && (
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Turf / Business Name</label>
+                <div className="relative">
+                  <Building className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
+                  <input
+                    id="input-businessname"
+                    type="text"
+                    value={businessName}
+                    onChange={(e) => setBusinessName(e.target.value)}
+                    placeholder="e.g. KickOff Arena Bandra"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
                 </div>
-
-                {role === 'PLAYER' && !isAdminLoginMode && (
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Preferred Sport
-                    </label>
-                    <select
-                      id="input-sport"
-                      value={preferredSport}
-                      onChange={(e) => setPreferredSport(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                    >
-                      <option value="Football">Football / Turf Soccer</option>
-                      <option value="Box Cricket">Box Cricket</option>
-                      <option value="Badminton">Badminton</option>
-                      <option value="Basketball">Basketball</option>
-                      <option value="Tennis">Tennis / Pickleball</option>
-                    </select>
-                  </div>
-                )}
-              </>
+              </div>
             )}
 
             <div>
@@ -606,7 +643,7 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder={isAdminLoginMode ? 'ayusiv189@gmail.com' : 'you@example.com'}
+                  placeholder="you@example.com"
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
                 />
               </div>
@@ -645,13 +682,13 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
                 <div className="relative">
                   <Lock className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
                   <input
-                    id="input-confirm-password"
+                    id="input-confirmpassword"
                     type="password"
-                    required
+                    required={!isLogin}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
                   />
                 </div>
               </div>
@@ -661,33 +698,35 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialRole = 'PLAYER' })
               id="auth-submit-btn"
               type="submit"
               disabled={loading}
-              className={`w-full ${isAdminLoginMode ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-950/50' : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-950/50'} text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg disabled:opacity-50 mt-6 text-sm`}
+              className="w-full bg-indigo-600 hover:bg-indigo-500 shadow-indigo-950/50 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg disabled:opacity-50 mt-6 text-sm"
             >
               {loading ? (
                 <RefreshCw className="w-5 h-5 animate-spin" />
               ) : (
                 <>
-                  <span>{isLogin ? (isAdminLoginMode ? 'Sign In as Staff / Admin' : 'Sign In with Email') : 'Create & Verify Account'}</span>
+                  <span>{isLogin ? 'Sign In with Email' : 'Create New Account'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
             </button>
           </form>
 
-          {/* Dedicated Staff / Admin Mode Toggle */}
-          <div className="mt-6 pt-4 border-t border-slate-800 text-center">
+          {/* Mode Switch Helper */}
+          <div className="mt-4 pt-3 border-t border-slate-800 text-center">
             <button
-              id="toggle-admin-login-mode-btn"
               type="button"
               onClick={() => {
-                setIsAdminLoginMode(!isAdminLoginMode);
+                setIsLogin(!isLogin);
                 setErrorMsg(null);
                 setInfoMsg(null);
               }}
-              className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+              className="text-xs text-slate-400 hover:text-indigo-400 transition-colors cursor-pointer"
             >
-              <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-              <span>{isAdminLoginMode ? '← Back to Player / Turf Owner Sign-in' : 'Staff / Super Admin Sign In'}</span>
+              {isLogin ? (
+                <span>Need a new account? <strong className="text-indigo-400">Create Account</strong></span>
+              ) : (
+                <span>Already have an account? <strong className="text-indigo-400">Sign In</strong></span>
+              )}
             </button>
           </div>
         </div>

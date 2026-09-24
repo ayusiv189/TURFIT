@@ -18,6 +18,7 @@ interface AuthContextType {
   loading: boolean;
   role: UserRole | null;
   isAdmin: boolean;
+  isOwnerRegistered: boolean;
   activeRole: 'ADMIN' | 'OWNER' | 'PLAYER';
   setActiveRole: (role: 'ADMIN' | 'OWNER' | 'PLAYER') => void;
   switchRole: (newRole: UserRole) => Promise<void>;
@@ -34,6 +35,7 @@ const AuthContext = createContext<AuthContextType>({
   loading: true,
   role: null,
   isAdmin: false,
+  isOwnerRegistered: false,
   activeRole: 'PLAYER',
   setActiveRole: () => {},
   switchRole: async () => {},
@@ -79,11 +81,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setProfile(data);
 
         // Set default active role
+        const isRegistered = Boolean(
+          isAdminUser ||
+          data.role === 'OWNER' ||
+          data.isOwnerRegistered === true ||
+          (data.businessName && data.businessName.trim().length > 0)
+        );
+
         if (isAdminUser || data.role === 'ADMIN') {
           const savedActive = localStorage.getItem('trufit_admin_active_role') as 'ADMIN' | 'OWNER' | 'PLAYER';
           setActiveRoleState(savedActive || 'ADMIN');
+        } else if (isRegistered) {
+          const savedActive = localStorage.getItem('trufit_admin_active_role') as 'ADMIN' | 'OWNER' | 'PLAYER';
+          setActiveRoleState(savedActive === 'OWNER' || data.role === 'OWNER' ? 'OWNER' : 'PLAYER');
         } else {
-          setActiveRoleState(data.role === 'OWNER' ? 'OWNER' : 'PLAYER');
+          setActiveRoleState('PLAYER');
         }
       } else {
         // Fallback profile if created via auth but doc creation was pending
@@ -96,6 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           email: firebaseUser.email || '',
           displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || (isAdminUser ? 'Super Admin' : 'User'),
           role: initialRole,
+          isOwnerRegistered: initialRole === 'OWNER',
           emailVerified: firebaseUser.emailVerified,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -119,6 +132,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         email: firebaseUser.email || '',
         displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || (isAdminUser ? 'Super Admin' : 'User'),
         role: role,
+        isOwnerRegistered: role === 'OWNER',
         emailVerified: firebaseUser.emailVerified,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -188,25 +202,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const isAdmin = isUserAdmin(user, profile);
 
+  const isOwnerRegistered = Boolean(
+    isAdmin ||
+    profile?.role === 'OWNER' ||
+    profile?.isOwnerRegistered === true ||
+    (profile?.businessName && profile.businessName.trim().length > 0)
+  );
+
   const setActiveRole = (newActiveRole: 'ADMIN' | 'OWNER' | 'PLAYER') => {
-    if (!isAdmin && newActiveRole === 'ADMIN') {
-      console.warn('Unauthorized role switch attempt to ADMIN blocked.');
+    if (newActiveRole === 'ADMIN' && !isAdmin) {
+      console.warn('Unauthorized admin role switch attempt blocked.');
+      return;
+    }
+    if (newActiveRole === 'OWNER' && !isOwnerRegistered) {
+      console.warn('Unauthorized owner role switch attempt blocked: account has not completed owner registration.');
+      setActiveRoleState('PLAYER');
       return;
     }
     setActiveRoleState(newActiveRole);
-    if (isAdmin) {
-      localStorage.setItem('trufit_admin_active_role', newActiveRole);
-    }
+    localStorage.setItem('trufit_admin_active_role', newActiveRole);
   };
 
   const switchRole = async (newRole: UserRole) => {
     if (!user) return;
     if (newRole === 'ADMIN' && !isAdmin) {
-      console.warn('Cannot switch profile role to ADMIN without authorization');
+      console.warn('Unauthorized admin role change attempt blocked.');
       return;
     }
-    await updateUserProfile({ role: newRole });
-    setActiveRole(newRole as 'ADMIN' | 'OWNER' | 'PLAYER');
+    const isOwner = newRole === 'OWNER';
+    const updates: Partial<UserProfile> = {
+      role: newRole,
+      ...(isOwner ? { isOwnerRegistered: true } : {}),
+    };
+    if (isOwner && (!profile?.businessName || profile.businessName.trim().length === 0)) {
+      updates.businessName = `${profile?.displayName || 'Owner'}'s Sports Arena`;
+    }
+    await updateUserProfile(updates);
+    setActiveRoleState(newRole as 'ADMIN' | 'OWNER' | 'PLAYER');
+    localStorage.setItem('trufit_admin_active_role', newRole as string);
   };
 
   const emailVerified = !!(user && (user.emailVerified || profile?.emailVerified));
@@ -220,6 +253,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loading,
         role,
         isAdmin,
+        isOwnerRegistered,
         activeRole,
         setActiveRole,
         switchRole,

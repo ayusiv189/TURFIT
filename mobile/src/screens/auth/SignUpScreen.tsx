@@ -97,7 +97,7 @@ export const SignUpScreen: React.FC<SignUpScreenProps> = ({ navigation }) => {
     >
       <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
-          <Text style={styles.appName}>Join TRUFIT</Text>
+          <Text style={styles.appName}>Join TURFIT</Text>
           <Text style={styles.tagline}>Create your account and get active</Text>
         </View>
 

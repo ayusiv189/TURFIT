@@ -1,7 +1,8 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
-import { Users, MapPin, Calendar, Clock, Crown, Trash2, User, ChevronRight, Check } from 'lucide-react-native';
+import { Users, MapPin, Calendar, Clock, Crown, Trash2, ChevronRight, Check, Zap, CreditCard, Play, MessageSquare, Flame } from 'lucide-react-native';
 import { Lobby } from '../types';
+import { getLobbyGameStatus } from '../services/communityService';
 
 interface LobbyCardProps {
   lobby: Lobby;
@@ -12,6 +13,7 @@ interface LobbyCardProps {
   onDeleteLobby?: () => void;
   onPressHostProfile?: (hostId: string) => void;
   onPressPlayerProfile?: (playerId: string) => void;
+  onOpenChat?: () => void;
 }
 
 export const LobbyCard: React.FC<LobbyCardProps> = ({
@@ -23,12 +25,24 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
   onDeleteLobby,
   onPressHostProfile,
   onPressPlayerProfile,
+  onOpenChat,
 }) => {
-  const isFull = lobby.currentPlayers >= lobby.maxPlayers;
-  const spotsRemaining = Math.max(0, lobby.maxPlayers - (lobby.currentPlayers || 0));
+  const currentCount = lobby.currentPlayers || 1;
+  const maxQuota = lobby.maxPlayers || 10;
+  const minQuota = lobby.minPlayers || Math.max(2, Math.floor(maxQuota / 2));
+  const isFull = currentCount >= maxQuota;
+  const isMinQuotaMet = currentCount >= minQuota;
+  const spotsRemaining = Math.max(0, maxQuota - currentCount);
+
+  // Dynamic cost division
+  const totalSlotPrice = lobby.totalSlotPrice || (Number(lobby.pricePerPlayer || 200) * maxQuota);
+  const dynamicCostPerPlayer = lobby.dynamicCostPerPlayer || Math.round(totalSlotPrice / Math.max(1, currentCount));
 
   // Extract players array safely
   const playerList = lobby.players || [];
+
+  const gameStatus = getLobbyGameStatus(lobby);
+  const isGameLiveOrOver = gameStatus === 'LIVE' || gameStatus === 'OVER';
 
   return (
     <TouchableOpacity
@@ -41,6 +55,16 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
         <View style={styles.titleArea}>
           <View style={styles.sportBadgeRow}>
             <Text style={styles.sportBadge}>{(lobby.sport || 'Sports').toUpperCase()}</Text>
+            {gameStatus === 'LIVE' ? (
+              <View style={styles.liveTag}>
+                <Play size={10} color="#10b981" fill="#10b981" />
+                <Text style={styles.liveTagText}>Match Live</Text>
+              </View>
+            ) : gameStatus === 'OVER' ? (
+              <View style={styles.overTag}>
+                <Text style={styles.overTagText}>Match Over</Text>
+              </View>
+            ) : null}
             {isHost && (
               <View style={styles.myLobbyTag}>
                 <Crown size={10} color="#f59e0b" />
@@ -53,6 +77,12 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
                 <Text style={styles.joinedTagText}>You're In</Text>
               </View>
             )}
+            {isMinQuotaMet && !isGameLiveOrOver && (
+              <View style={styles.quotaMetTag}>
+                <Zap size={10} color="#10b981" />
+                <Text style={styles.quotaMetTagText}>Quota Met</Text>
+              </View>
+            )}
           </View>
           <Text style={styles.title} numberOfLines={1}>
             {lobby.name}
@@ -62,7 +92,7 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
         <View style={[styles.playerBadge, isFull && styles.playerBadgeFull]}>
           <Users size={12} color={isFull ? '#ef4444' : '#10b981'} />
           <Text style={[styles.playerBadgeText, isFull && styles.playerBadgeTextFull]}>
-            {lobby.currentPlayers}/{lobby.maxPlayers}
+            {currentCount}/{maxQuota}
           </Text>
         </View>
       </View>
@@ -91,7 +121,7 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
           </View>
         </TouchableOpacity>
 
-        {isHost && onDeleteLobby && (
+        {isHost && onDeleteLobby && !isGameLiveOrOver && (
           <TouchableOpacity
             activeOpacity={0.8}
             onPress={(e) => {
@@ -105,6 +135,22 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
           </TouchableOpacity>
         )}
       </View>
+
+      {/* Host Announcement & Squad Tag */}
+      {!!lobby.hostAnnouncement && (
+        <View style={styles.hostAnnouncementBox}>
+          <Text style={styles.hostAnnouncementQuote}>"{lobby.hostAnnouncement}"</Text>
+        </View>
+      )}
+
+      {!!lobby.initialSquadCount && lobby.initialSquadCount > 1 && (
+        <View style={styles.squadBadgeRow}>
+          <Users size={12} color="#f59e0b" />
+          <Text style={styles.squadBadgeText}>
+            {lobby.initialSquadCount} friends in squad • Looking for {Math.max(0, maxQuota - currentCount)} more
+          </Text>
+        </View>
+      )}
 
       {/* Venue & Location */}
       <View style={styles.metaRow}>
@@ -126,21 +172,62 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
         </View>
       </View>
 
+      {/* Athlete Quota Progress Bar */}
+      <View style={styles.quotaBarBox}>
+        <View style={styles.quotaBarHeader}>
+          <Text style={styles.quotaBarLabel}>
+            Athlete Quota: <Text style={styles.quotaBoldText}>{currentCount}/{maxQuota}</Text> (Min: {minQuota})
+          </Text>
+          <Text style={[styles.quotaStatusText, isMinQuotaMet ? styles.quotaStatusMet : styles.quotaStatusNeeded]}>
+            {isMinQuotaMet ? 'Match Confirmed' : `${minQuota - currentCount} more needed`}
+          </Text>
+        </View>
+        <View style={styles.quotaTrack}>
+          <View
+            style={[
+              styles.quotaFill,
+              { width: `${Math.min(100, (currentCount / maxQuota) * 100)}%` },
+              isMinQuotaMet && styles.quotaFillMet,
+            ]}
+          />
+        </View>
+      </View>
+
       {/* Players Who Are In (Roster Mini-Bar) */}
       <View style={styles.rosterSection}>
         <View style={styles.rosterHeader}>
           <Text style={styles.rosterLabel}>
-            Players In ({lobby.currentPlayers}/{lobby.maxPlayers})
+            Squad Roster ({currentCount}/{maxQuota})
           </Text>
-          <Text style={styles.spotsLeftText}>
-            {spotsRemaining > 0 ? `${spotsRemaining} spot${spotsRemaining === 1 ? '' : 's'} left` : 'Full'}
-          </Text>
+          <View style={styles.rosterHeaderRight}>
+            {onOpenChat && (
+              <TouchableOpacity
+                style={styles.squadChatPill}
+                onPress={(e) => {
+                  e.stopPropagation();
+                  onOpenChat();
+                }}
+                activeOpacity={0.7}
+              >
+                <MessageSquare size={11} color="#38bdf8" />
+                <Text style={styles.squadChatPillText}>Squad Chat</Text>
+                <Flame size={10} color="#fbbf24" />
+              </TouchableOpacity>
+            )}
+            <Text style={styles.spotsLeftText}>
+              {gameStatus === 'OVER'
+                ? 'Match Concluded'
+                : spotsRemaining > 0
+                ? `${spotsRemaining} spot${spotsRemaining === 1 ? '' : 's'} left`
+                : 'Full'}
+            </Text>
+          </View>
         </View>
 
         <View style={styles.playerAvatarsRow}>
           {playerList.slice(0, 5).map((player, idx) => (
             <TouchableOpacity
-              key={player.id || player.playerId || player.uid || String(idx)}
+              key={player.playerId || player.uid || String(idx)}
               activeOpacity={0.75}
               onPress={() => {
                 const uid = player.playerId || player.uid;
@@ -169,9 +256,9 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
             </TouchableOpacity>
           ))}
 
-          {lobby.currentPlayers > 5 && (
+          {currentCount > 5 && (
             <View style={styles.rosterMoreBadge}>
-              <Text style={styles.rosterMoreText}>+{lobby.currentPlayers - 5}</Text>
+              <Text style={styles.rosterMoreText}>+{currentCount - 5}</Text>
             </View>
           )}
 
@@ -180,23 +267,36 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
             onPress={onPressCard}
             activeOpacity={0.7}
           >
-            <Text style={styles.viewRosterText}>View Roster</Text>
+            <Text style={styles.viewRosterText}>Roster</Text>
             <ChevronRight size={12} color="#38bdf8" />
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* Footer: Price & In/Out Action */}
+      {/* Footer: Dynamic Cost Division & In/Out Action */}
       <View style={styles.footer}>
         <View>
-          <Text style={styles.priceLabel}>Per player share</Text>
-          <Text style={styles.priceValue}>₹{lobby.pricePerPlayer || 200}</Text>
+          <Text style={styles.priceLabel}>Target Share / Player</Text>
+          <View style={styles.priceRow}>
+            <Text style={styles.priceValue}>₹{lobby.pricePerPlayer || 200}</Text>
+            {currentCount > 1 && (
+              <Text style={styles.dynamicSplitSubtext}>
+                (₹{totalSlotPrice} split among {currentCount})
+              </Text>
+            )}
+          </View>
         </View>
 
         <View style={styles.actionButtonGroup}>
           {isHost ? (
             <View style={styles.hostBadgeBox}>
               <Text style={styles.hostBadgeBoxText}>Host / Organizer</Text>
+            </View>
+          ) : isGameLiveOrOver ? (
+            <View style={gameStatus === 'LIVE' ? styles.liveBadgeBox : styles.overBadgeBox}>
+              <Text style={gameStatus === 'LIVE' ? styles.liveBadgeBoxText : styles.overBadgeBoxText}>
+                {gameStatus === 'LIVE' ? 'Match In Progress' : 'Match Concluded'}
+              </Text>
             </View>
           ) : (
             <TouchableOpacity
@@ -213,7 +313,7 @@ export const LobbyCard: React.FC<LobbyCardProps> = ({
               disabled={isFull && !isJoined}
             >
               <Text style={[styles.actionButtonText, isJoined ? styles.leaveText : styles.joinText]}>
-                {isJoined ? "I'm Out" : isFull ? 'Lobby Full' : "I'm In"}
+                {isJoined ? "Step Out" : isFull ? 'Lobby Full' : "I'm In"}
               </Text>
             </TouchableOpacity>
           )}
@@ -289,6 +389,77 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: '700',
     color: '#10b981',
+  },
+  quotaMetTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  quotaMetTagText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#10b981',
+  },
+  quotaBarBox: {
+    backgroundColor: '#0c1220',
+    padding: 8,
+    borderRadius: 8,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  quotaBarHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 5,
+  },
+  quotaBarLabel: {
+    fontSize: 10,
+    color: '#94a3b8',
+    fontWeight: '600',
+  },
+  quotaBoldText: {
+    color: '#ffffff',
+    fontWeight: '800',
+  },
+  quotaStatusText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  quotaStatusMet: {
+    color: '#10b981',
+  },
+  quotaStatusNeeded: {
+    color: '#f59e0b',
+  },
+  quotaTrack: {
+    height: 4,
+    backgroundColor: '#1e293b',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  quotaFill: {
+    height: '100%',
+    backgroundColor: '#f59e0b',
+    borderRadius: 2,
+  },
+  quotaFillMet: {
+    backgroundColor: '#10b981',
+  },
+  priceRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 4,
+  },
+  dynamicSplitSubtext: {
+    fontSize: 9,
+    color: '#38bdf8',
+    fontWeight: '600',
   },
   title: {
     fontSize: 16,
@@ -405,6 +576,27 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#94a3b8',
+  },
+  rosterHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  squadChatPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.3)',
+  },
+  squadChatPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#38bdf8',
   },
   spotsLeftText: {
     fontSize: 10,
@@ -543,5 +735,92 @@ const styles = StyleSheet.create({
   },
   leaveText: {
     color: '#ef4444',
+  },
+  liveTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  liveTagText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#10b981',
+  },
+  overTag: {
+    backgroundColor: 'rgba(100, 116, 139, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(100, 116, 139, 0.3)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  overTagText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#94a3b8',
+  },
+  liveBadgeBox: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+  },
+  liveBadgeBoxText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#10b981',
+  },
+  overBadgeBox: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(100, 116, 139, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(100, 116, 139, 0.3)',
+  },
+  overBadgeBoxText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#94a3b8',
+  },
+  hostAnnouncementBox: {
+    backgroundColor: 'rgba(99, 102, 241, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(99, 102, 241, 0.3)',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 8,
+  },
+  hostAnnouncementQuote: {
+    color: '#c7d2fe',
+    fontSize: 11,
+    fontStyle: 'italic',
+    lineHeight: 15,
+  },
+  squadBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.25)',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 8,
+  },
+  squadBadgeText: {
+    color: '#fcd34d',
+    fontSize: 11,
+    fontWeight: '600',
   },
 });

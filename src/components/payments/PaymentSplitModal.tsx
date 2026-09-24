@@ -224,7 +224,7 @@ export const PaymentSplitModal: React.FC<PaymentSplitModalProps> = ({
 
               {addingPlayer && (
                 <div className="bg-slate-950 p-3 rounded-2xl border border-indigo-500/30 space-y-3">
-                  <label className="block text-xs font-medium text-slate-300">Select Athlete from TruFit</label>
+                  <label className="block text-xs font-medium text-slate-300">Select Athlete from TurFit</label>
                   <select
                     value={selectedUser}
                     onChange={(e) => setSelectedUser(e.target.value)}

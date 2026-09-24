@@ -10,6 +10,9 @@
         "displayName": { "type": "string" },
         "role": { "type": "string", "enum": ["PLAYER", "OWNER"] },
         "phoneNumber": { "type": "string" },
+        "isPhoneVerified": { "type": "boolean" },
+        "phoneVerifiedAt": { "type": "string" },
+        "phoneVerificationProvider": { "type": "string" },
         "paymentSettings": { "type": "object" },
         "createdAt": { "type": "string" }
       },
@@ -117,6 +120,23 @@
       },
       "required": ["id", "bookingId", "playerId", "amount", "status"]
     },
+    "PaymentWebhook": {
+      "title": "PaymentWebhook",
+      "description": "Real-time bank / merchant UPI settlement webhook events",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderRef": { "type": "string" },
+        "turfId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "amount": { "type": "number" },
+        "bankUtr": { "type": "string" },
+        "merchantProvider": { "type": "string" },
+        "status": { "type": "string", "enum": ["SUCCESS", "PENDING", "FAILED"] },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "orderRef", "amount", "bankUtr", "status"]
+    },
     "Lobby": {
       "title": "Lobby",
       "description": "Community sports matchmaking lobby",
@@ -130,9 +150,321 @@
         "bookingId": { "type": "string" },
         "slotId": { "type": "string" },
         "maxPlayers": { "type": "number" },
+        "minPlayers": { "type": "number" },
+        "totalSlotPrice": { "type": "number" },
+        "dynamicCostPerPlayer": { "type": "number" },
         "status": { "type": "string" }
       },
       "required": ["id", "name", "sport", "hostId"]
+    },
+    "PlayerPool": {
+      "title": "PlayerPool",
+      "description": "Athlete interest group for automated turf squad matchmaking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "creatorId": { "type": "string" },
+        "creatorName": { "type": "string" },
+        "sport": { "type": "string" },
+        "city": { "type": "string" },
+        "area": { "type": "string" },
+        "preferredDate": { "type": "string" },
+        "matchHoursCategory": { "type": "string" },
+        "requiredPlayers": { "type": "number" },
+        "currentPlayersCount": { "type": "number" },
+        "maxPricePerPlayer": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "creatorId", "sport", "city", "requiredPlayers", "status"]
+    },
+    "Refund": {
+      "title": "Refund",
+      "description": "Real-time refund ledger entry for lobby step-out or cancellation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "lobbyId": { "type": "string" },
+        "bookingId": { "type": "string" },
+        "uid": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string" },
+        "refundTxnId": { "type": "string" },
+        "reason": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "uid", "amount", "status"]
+    },
+    "PlayerRating": {
+      "title": "PlayerRating",
+      "description": "Post-match player sportsmanship, skill, and punctuality rating with badges",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "reviewerId": { "type": "string" },
+        "reviewerName": { "type": "string" },
+        "reviewerPhotoURL": { "type": "string" },
+        "targetId": { "type": "string" },
+        "targetName": { "type": "string" },
+        "matchId": { "type": "string" },
+        "lobbyId": { "type": "string" },
+        "turfName": { "type": "string" },
+        "sport": { "type": "string" },
+        "sportsmanshipRating": { "type": "number" },
+        "skillRating": { "type": "number" },
+        "punctualityRating": { "type": "number" },
+        "overallRating": { "type": "number" },
+        "badges": { "type": "array" },
+        "feedback": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "reviewerId", "targetId", "overallRating", "createdAt"]
+    },
+    "LobbyMessage": {
+      "title": "LobbyMessage",
+      "description": "Auto-expiring / ephemeral chat message for a match lobby squad",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "lobbyId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderPhotoURL": { "type": "string" },
+        "text": { "type": "string" },
+        "type": { "type": "string", "enum": ["TEXT", "SYSTEM", "ANNOUNCEMENT"] },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["id", "lobbyId", "senderId", "senderName", "text", "createdAt", "expiresAt"]
+    },
+    "AdminConfig": {
+      "title": "AdminConfig",
+      "description": "Central platform payment and routing configuration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "upiId": { "type": "string" },
+        "beneficiaryName": { "type": "string" },
+        "razorpayKeyId": { "type": "string" },
+        "bankName": { "type": "string" },
+        "accountNumber": { "type": "string" },
+        "ifscCode": { "type": "string" },
+        "platformFeePercent": { "type": "number" },
+        "updatedAt": { "type": "string" },
+        "updatedBy": { "type": "string" }
+      },
+      "required": ["upiId"]
+    },
+    "Offer": {
+      "title": "Offer",
+      "description": "Turf promotional offer or discount promo code with usage limits",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "turfId": { "type": "string" },
+        "turfName": { "type": "string" },
+        "arenaId": { "type": "string" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "discountType": { "type": "string", "enum": ["PERCENTAGE", "FIXED"] },
+        "discountValue": { "type": "number" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "applicableDays": { "type": "array" },
+        "usageLimit": { "type": "number" },
+        "usedCount": { "type": "number" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "code", "name", "discountType", "discountValue", "usageLimit", "usedCount", "active"]
+    },
+    "CoachProfile": {
+      "title": "CoachProfile",
+      "description": "Certified Coach and Academy trainer profile",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "bio": { "type": "string" },
+        "sports": { "type": "array" },
+        "experienceYears": { "type": "number" },
+        "specialization": { "type": "string" },
+        "isVerified": { "type": "boolean" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "name", "sports"]
+    },
+    "CoachBatch": {
+      "title": "CoachBatch",
+      "description": "Training batch or coaching clinic session schedule",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "coachId": { "type": "string" },
+        "coachName": { "type": "string" },
+        "title": { "type": "string" },
+        "sport": { "type": "string" },
+        "turfId": { "type": "string" },
+        "turfName": { "type": "string" },
+        "timeSlot": { "type": "string" },
+        "feePerMonth": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "coachId", "title", "sport", "turfId"]
+    },
+    "Tournament": {
+      "title": "Tournament",
+      "description": "Open community and corporate tournament championships",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "organizerId": { "type": "string" },
+        "organizerName": { "type": "string" },
+        "title": { "type": "string" },
+        "category": { "type": "string", "enum": ["COMMUNITY_OPEN", "CORPORATE"] },
+        "sport": { "type": "string" },
+        "format": { "type": "string" },
+        "turfId": { "type": "string" },
+        "turfName": { "type": "string" },
+        "status": { "type": "string" },
+        "registrationFeePerTeam": { "type": "number" },
+        "organizerFeePaid": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "organizerId", "title", "category", "sport", "turfId"]
+    },
+    "CoachSubscriptionPlan": {
+      "title": "CoachSubscriptionPlan",
+      "description": "Coach and Academy SaaS membership subscription tiers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "price": { "type": "number" },
+        "originalPrice": { "type": "number" },
+        "durationDays": { "type": "number" },
+        "duration": { "type": "string" },
+        "role": { "type": "string", "enum": ["COACH", "ACADEMY", "ALL"] },
+        "popular": { "type": "boolean" },
+        "maxBatches": { "type": "number" },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "isActive": { "type": "boolean" },
+        "isArchived": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "price", "durationDays", "role", "isActive"]
+    },
+    "UserFollow": {
+      "title": "UserFollow",
+      "description": "Follow relationship for players, venue owners, and teams",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "followerId": { "type": "string" },
+        "followerName": { "type": "string" },
+        "followerRole": { "type": "string", "enum": ["PLAYER", "OWNER"] },
+        "targetId": { "type": "string" },
+        "targetType": { "type": "string", "enum": ["PLAYER", "OWNER", "TEAM"] },
+        "targetName": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "followerId", "targetId", "targetType", "createdAt"]
+    },
+    "SocialPost": {
+      "title": "SocialPost",
+      "description": "Social media post with photos/videos, likes, comments, and engagement",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorRole": { "type": "string", "enum": ["PLAYER", "OWNER"] },
+        "caption": { "type": "string" },
+        "mediaUrls": { "type": "array", "items": { "type": "string" } },
+        "likesCount": { "type": "number" },
+        "likedBy": { "type": "array", "items": { "type": "string" } },
+        "commentsCount": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "authorId", "authorName", "authorRole", "caption", "createdAt"]
+    },
+    "DirectConversation": {
+      "title": "DirectConversation",
+      "description": "Phase M1 direct messaging conversation linked directly to participant UIDs",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "participants": { "type": "array", "items": { "type": "string" } },
+        "participantProfiles": { "type": "object" },
+        "lastMessage": { "type": "string" },
+        "lastMessageSenderId": { "type": "string" },
+        "lastMessageAt": { "type": "string" },
+        "unreadCount": { "type": "object" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "participants", "updatedAt"]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Individual 1-on-1 direct message item within a conversation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "conversationId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderPhotoURL": { "type": "string" },
+        "text": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "mediaName": { "type": "string" },
+        "mediaSize": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "read": { "type": "boolean" }
+      },
+      "required": ["id", "conversationId", "senderId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/offers/{offerId}": {
+      "schema": { "$ref": "#/entities/Offer" },
+      "description": "Promotional offers and coupon codes"
+    },
+    "/coaches/{coachId}": {
+      "schema": { "$ref": "#/entities/CoachProfile" },
+      "description": "Coach and Trainer Profiles"
+    },
+    "/coachBatches/{batchId}": {
+      "schema": { "$ref": "#/entities/CoachBatch" },
+      "description": "Coach training programs and batch schedules"
+    },
+    "/tournaments/{tournamentId}": {
+      "schema": { "$ref": "#/entities/Tournament" },
+      "description": "Community and Corporate Tournaments"
+    },
+    "/coachSubscriptionPlans/{planId}": {
+      "schema": { "$ref": "#/entities/CoachSubscriptionPlan" },
+      "description": "Coach & Academy SaaS Membership Plans"
+    },
+    "/follows/{followId}": {
+      "schema": { "$ref": "#/entities/UserFollow" },
+      "description": "Follow relationships between players, owners, and teams"
+    },
+    "/socialPosts/{postId}": {
+      "schema": { "$ref": "#/entities/SocialPost" },
+      "description": "Social media posts, media, likes, and comments"
+    },
+    "/direct_conversations/{convId}": {
+      "schema": { "$ref": "#/entities/DirectConversation" },
+      "description": "Phase M1 direct messaging conversations and subcollection messages"
     }
   }
 }

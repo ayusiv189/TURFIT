@@ -32,7 +32,9 @@ import {
   Activity,
   Check,
   Calendar,
+  ShieldCheck,
 } from 'lucide-react-native';
+import { PhoneVerificationModal } from '../../components/PhoneVerificationModal';
 
 interface PlayerProfileScreenProps {
   navigation?: any;
@@ -76,6 +78,7 @@ export const PlayerProfileScreen: React.FC<PlayerProfileScreenProps> = ({ naviga
   const [isOwnerUser, setIsOwnerUser] = useState(false);
   const [checkingOwner, setCheckingOwner] = useState(true);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showPhoneModal, setShowPhoneModal] = useState(false);
 
   // Profile Form States
   const [displayName, setDisplayName] = useState(profile?.displayName || '');
@@ -284,7 +287,7 @@ export const PlayerProfileScreen: React.FC<PlayerProfileScreenProps> = ({ naviga
       <View style={styles.rewardsCard}>
         <View style={styles.rewardsHeader}>
           <View>
-            <Text style={styles.rewardsTitle}>TruFit Rewards Wallet</Text>
+            <Text style={styles.rewardsTitle}>TurFit Rewards Wallet</Text>
             <Text style={styles.rewardsSub}>Tier: {rewardWallet?.tier || 'BRONZE'}</Text>
           </View>
           <View style={styles.pointsBadge}>
@@ -329,7 +332,23 @@ export const PlayerProfileScreen: React.FC<PlayerProfileScreenProps> = ({ naviga
         <View style={styles.detailRow}>
           <Phone size={16} color="#94a3b8" />
           <View style={styles.detailTextWrapper}>
-            <Text style={styles.detailLabel}>Phone Number</Text>
+            <View style={styles.phoneLabelRow}>
+              <Text style={styles.detailLabel}>Phone Number</Text>
+              {profile?.isPhoneVerified ? (
+                <View style={styles.verifiedBadgeRow}>
+                  <ShieldCheck size={11} color="#10b981" />
+                  <Text style={styles.verifiedBadgeText}>VERIFIED</Text>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.verifyNowBtn}
+                  onPress={() => setShowPhoneModal(true)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.verifyNowBtnText}>Verify Phone</Text>
+                </TouchableOpacity>
+              )}
+            </View>
             <Text style={styles.detailValue}>{profile?.phoneNumber || 'Not provided'}</Text>
           </View>
         </View>
@@ -367,7 +386,7 @@ export const PlayerProfileScreen: React.FC<PlayerProfileScreenProps> = ({ naviga
       {/* Logout */}
       <TouchableOpacity style={styles.logoutButton} onPress={logout}>
         <LogOut size={18} color="#ef4444" />
-        <Text style={styles.logoutText}>Sign Out of TruFit</Text>
+        <Text style={styles.logoutText}>Sign Out of TurFit</Text>
       </TouchableOpacity>
 
       {/* Edit Profile Modal */}
@@ -521,6 +540,20 @@ export const PlayerProfileScreen: React.FC<PlayerProfileScreenProps> = ({ naviga
           </View>
         </View>
       </Modal>
+
+      {/* Mobile Number Verification Modal */}
+      <PhoneVerificationModal
+        visible={showPhoneModal}
+        onClose={() => setShowPhoneModal(false)}
+        title="Verify Mobile Number"
+        subtitle="Keep your player profile verified for instant WhatsApp booking passes and priority court access."
+        actionLabel="Verify Mobile"
+        onSuccess={(verifiedPhone) => {
+          setShowPhoneModal(false);
+          setPhoneNumber(verifiedPhone.replace('+91', ''));
+          Alert.alert('Phone Verified! 🎉', `${verifiedPhone} is now verified on your player profile.`);
+        }}
+      />
     </ScrollView>
   );
 };
@@ -963,5 +996,88 @@ const styles = StyleSheet.create({
     color: '#064e3b',
     fontSize: 14,
     fontWeight: '800',
+  },
+  themeSectionCard: {
+    backgroundColor: '#0f172a',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  themeSectionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f8fafc',
+    marginBottom: 2,
+  },
+  themeSectionSubtitle: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginBottom: 14,
+  },
+  themeOptionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  themeOptionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#131d31',
+    borderRadius: 10,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  themeOptionBtnActive: {
+    backgroundColor: '#064e3b',
+    borderColor: '#10b981',
+  },
+  themeOptionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#94a3b8',
+  },
+  themeOptionTextActive: {
+    color: '#ffffff',
+    fontWeight: '700',
+  },
+  phoneLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  verifiedBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.25)',
+  },
+  verifiedBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#10b981',
+    letterSpacing: 0.5,
+  },
+  verifyNowBtn: {
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.3)',
+  },
+  verifyNowBtnText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#38bdf8',
   },
 });

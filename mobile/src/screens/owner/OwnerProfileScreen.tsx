@@ -10,7 +10,19 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
-import { Building, Mail, Phone, MapPin, DollarSign, LogOut, Edit2, X, ShieldCheck, UserCheck, ArrowRightLeft } from 'lucide-react-native';
+import {
+  Building,
+  Mail,
+  Phone,
+  MapPin,
+  DollarSign,
+  LogOut,
+  Edit2,
+  X,
+  ShieldCheck,
+  UserCheck,
+  ArrowRightLeft,
+} from 'lucide-react-native';
 
 interface OwnerProfileScreenProps {
   navigation?: any;
@@ -88,15 +100,15 @@ export const OwnerProfileScreen: React.FC<OwnerProfileScreenProps> = ({ navigati
       >
         <View style={styles.payoutHeader}>
           <ShieldCheck size={18} color="#10b981" />
-          <Text style={styles.payoutTitle}>Owner Payment ID & Payouts</Text>
+          <Text style={styles.payoutTitle}>Earnings Wallet & Admin Payouts</Text>
         </View>
         <Text style={styles.payoutText}>
-          {profile?.paymentSettings?.upiId
-            ? `Active UPI VPA: ${profile.paymentSettings.upiId} (${profile.paymentSettings.beneficiaryName || 'Direct Credit'})`
-            : 'Configure your UPI ID, QR code standee & bank account to receive direct player prepayments.'}
+          {profile?.paymentSettings?.upiId || profile?.paymentSettings?.accountNumber
+            ? `Payout Settlement Destination: ${profile.paymentSettings.upiId || profile.paymentSettings.accountNumber} (${profile.paymentSettings.beneficiaryName || 'Admin Settlement'})`
+            : 'View online booking earnings and configure receiving bank/UPI details for Admin settlements.'}
         </Text>
         <View style={styles.payoutActionRow}>
-          <Text style={styles.payoutActionText}>Open Payment Settings →</Text>
+          <Text style={styles.payoutActionText}>Manage Earnings & Withdrawals →</Text>
         </View>
       </TouchableOpacity>
 
@@ -446,5 +458,53 @@ const styles = StyleSheet.create({
     color: '#064e3b',
     fontSize: 14,
     fontWeight: '800',
+  },
+  themeSectionCard: {
+    backgroundColor: '#0f172a',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  themeSectionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f8fafc',
+    marginBottom: 2,
+  },
+  themeSectionSubtitle: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginBottom: 14,
+  },
+  themeOptionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  themeOptionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#131d31',
+    borderRadius: 10,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  themeOptionBtnActive: {
+    backgroundColor: '#064e3b',
+    borderColor: '#10b981',
+  },
+  themeOptionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#94a3b8',
+  },
+  themeOptionTextActive: {
+    color: '#ffffff',
+    fontWeight: '700',
   },
 });

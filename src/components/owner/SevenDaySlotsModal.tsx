@@ -19,7 +19,7 @@ interface SevenDaySlotsModalProps {
   isOpen: boolean;
   onClose: () => void;
   turf: Turf;
-  arenas: Arena[];
+  arenas?: Arena[];
   onSlotsGenerated: () => void;
   showToast: (text: string, type?: 'success' | 'error') => void;
 }
@@ -30,19 +30,27 @@ export const SevenDaySlotsModal: React.FC<SevenDaySlotsModalProps> = ({
   isOpen,
   onClose,
   turf,
-  arenas,
+  arenas = [],
   onSlotsGenerated,
   showToast,
 }) => {
   const { user } = useAuth();
-  const [selectedArenaId, setSelectedArenaId] = useState<string>(arenas[0]?.id || '');
+  const safeArenas = arenas || [];
+  const [selectedArenaId, setSelectedArenaId] = useState<string>(safeArenas[0]?.id || '');
   const [startDate, setStartDate] = useState<string>(getTodayDateString());
   const [startHour, setStartHour] = useState<number>(6); // 6 AM
   const [endHour, setEndHour] = useState<number>(23); // 11 PM
   const [durationHours, setDurationHours] = useState<number>(1);
   const [price, setPrice] = useState<number>(
-    arenas[0]?.defaultPricePerHour || turf.basePrice || 1000
+    safeArenas[0]?.defaultPricePerHour || (safeArenas[0] as any)?.pricePerSlot || turf?.basePrice || 1000
   );
+
+  React.useEffect(() => {
+    if (!selectedArenaId && safeArenas.length > 0) {
+      setSelectedArenaId(safeArenas[0].id);
+      setPrice(safeArenas[0].defaultPricePerHour || (safeArenas[0] as any).pricePerSlot || turf?.basePrice || 1000);
+    }
+  }, [safeArenas, selectedArenaId, turf]);
   const [selectedDays, setSelectedDays] = useState<string[]>([...ALL_DAYS]);
   const [loading, setLoading] = useState<boolean>(false);
   const [createdSummary, setCreatedSummary] = useState<{

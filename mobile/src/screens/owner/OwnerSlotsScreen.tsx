@@ -11,16 +11,20 @@ import {
   Alert,
 } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
+import { useOwnerSubscription } from '../../contexts/OwnerSubscriptionContext';
+import { SubscriptionFeatureGate } from '../../components/SubscriptionFeatureGate';
 import {
   getOwnerTurfs,
   getArenasByTurf,
   getSlotsByArenaAndDate,
+  listenArenaSlots,
   batchGenerateMultiDaySlots,
   toggleSlotBlock,
   createSlot,
+  updateSlotPrice,
 } from '../../services/dbService';
 import { Turf, Arena, Slot } from '../../types';
-import { Clock, Calendar, Sparkles, Lock, Unlock, Plus, Layers, X, Check, CalendarDays } from 'lucide-react-native';
+import { Clock, Calendar, Sparkles, Lock, Unlock, Plus, Layers, X, Check, CalendarDays, Edit3 } from 'lucide-react-native';
 
 const DAYS_OF_WEEK = [
   { key: 'Mon', label: 'Mon' },
@@ -34,6 +38,7 @@ const DAYS_OF_WEEK = [
 
 export const OwnerSlotsScreen: React.FC = () => {
   const { user } = useAuth();
+  const { canAccess, plan } = useOwnerSubscription();
   const [activeTab, setActiveTab] = useState<'AUTO' | 'MANUAL'>('AUTO');
   const [turfs, setTurfs] = useState<Turf[]>([]);
   const [selectedTurf, setSelectedTurf] = useState<Turf | null>(null);
@@ -61,6 +66,11 @@ export const OwnerSlotsScreen: React.FC = () => {
   const [manualMaxPlayers, setManualMaxPlayers] = useState('10');
   const [manualStatus, setManualStatus] = useState<'AVAILABLE' | 'BLOCKED'>('AVAILABLE');
   const [savingManual, setSavingManual] = useState(false);
+
+  // Edit Slot Price State (Requirement 5: Owner flexibility to edit price of each slot after generation)
+  const [editingSlot, setEditingSlot] = useState<Slot | null>(null);
+  const [newSlotPrice, setNewSlotPrice] = useState<string>('');
+  const [savingPrice, setSavingPrice] = useState(false);
 
   // Next 14 days quick selector
   const [dateList, setDateList] = useState<{ date: string; day: string; label: string }[]>([]);
@@ -106,18 +116,13 @@ export const OwnerSlotsScreen: React.FC = () => {
     }
   }, [selectedTurf]);
 
-  const loadSlots = async () => {
-    if (!selectedArena || !selectedDate) return;
-    try {
-      const s = await getSlotsByArenaAndDate(selectedArena.id, selectedDate);
-      setSlots(s);
-    } catch (err) {
-      console.warn('Error loading slots:', err);
-    }
-  };
-
   useEffect(() => {
-    loadSlots();
+    if (selectedArena && selectedDate) {
+      const unsub = listenArenaSlots(selectedArena.id, selectedDate, (s) => {
+        setSlots(s);
+      });
+      return () => unsub();
+    }
   }, [selectedArena, selectedDate]);
 
   const toggleDayFilter = (dayKey: string) => {
@@ -233,6 +238,36 @@ export const OwnerSlotsScreen: React.FC = () => {
     }
   };
 
+  const handleOpenEditPrice = (slot: Slot) => {
+    if (slot.status === 'BOOKED') {
+      Alert.alert('Slot Already Booked', 'This slot is already booked by a player. Price cannot be altered for active confirmed bookings.');
+      return;
+    }
+    setEditingSlot(slot);
+    setNewSlotPrice(String(slot.price));
+  };
+
+  const handleSaveSlotPrice = async () => {
+    if (!editingSlot) return;
+    const parsed = parseInt(newSlotPrice, 10);
+    if (!parsed || parsed <= 0) {
+      Alert.alert('Invalid Price', 'Please enter a valid price greater than 0.');
+      return;
+    }
+    setSavingPrice(true);
+    try {
+      await updateSlotPrice(editingSlot.id, parsed);
+      setEditingSlot(null);
+      await loadSlots();
+      Alert.alert('Price Updated ⚡', `Slot (${editingSlot.startTime} - ${editingSlot.endTime}) price updated to ₹${parsed}. Live immediately for player bookings.`);
+    } catch (err: any) {
+      console.warn('Error updating slot price:', err);
+      Alert.alert('Update Failed', err.message || 'Could not update slot price.');
+    } finally {
+      setSavingPrice(false);
+    }
+  };
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
       {/* Mode Switcher */}
@@ -243,7 +278,7 @@ export const OwnerSlotsScreen: React.FC = () => {
         >
           <Sparkles size={16} color={activeTab === 'AUTO' ? '#064e3b' : '#94a3b8'} />
           <Text style={[styles.modeTabText, activeTab === 'AUTO' && styles.modeTabTextActive]}>
-            7-Day Auto Generator
+            7-Day Auto Generator {!canAccess('autoSlotGenerator') ? '🔒' : ''}
           </Text>
         </TouchableOpacity>
 
@@ -295,6 +330,22 @@ export const OwnerSlotsScreen: React.FC = () => {
 
       {/* 7-Day Slot Generator Card */}
       {activeTab === 'AUTO' && (
+        !canAccess('autoSlotGenerator') ? (
+          <View style={{ marginVertical: 12 }}>
+            <SubscriptionFeatureGate
+              featureKey="autoSlotGenerator"
+              featureTitle="7-Day Multi-Pitch Auto Slot Generator"
+              featureDescription="Generate and publish recurring slot schedules for up to 14 days in advance with custom durations, buffer times, and peak pricing."
+              requiredPlanName={plan?.name || 'Pro Annual'}
+              benefits={[
+                'Generate up to 14 days of repeating time slots in 1 tap',
+                'Configure custom peak-hour pricing & weekend surge rates',
+                'Preserve existing player bookings while filling vacant slots',
+                'Instant cloud publishing to the TruFit Player mobile app',
+              ]}
+            />
+          </View>
+        ) : (
         <View style={styles.generatorCard}>
           <View style={styles.genCardHeader}>
             <CalendarDays size={18} color="#10b981" />
@@ -378,7 +429,7 @@ export const OwnerSlotsScreen: React.FC = () => {
               />
             </View>
             <View style={styles.inputCol}>
-              <Text style={styles.inputLabel}>Price / Slot (₹)</Text>
+              <Text style={styles.inputLabel}>Pitch Price (₹)</Text>
               <TextInput
                 style={styles.textInput}
                 value={autoPrice}
@@ -412,6 +463,7 @@ export const OwnerSlotsScreen: React.FC = () => {
             )}
           </TouchableOpacity>
         </View>
+        )
       )}
 
       {/* Date Horizon Scroller */}
@@ -456,18 +508,40 @@ export const OwnerSlotsScreen: React.FC = () => {
               slot.status === 'BOOKED_BY_PLAYER' ||
               slot.status === 'BOOKED_BY_OWNER';
 
+            const todayStr = new Date().toISOString().split('T')[0];
+            const now = new Date();
+            const curHours = now.getHours().toString().padStart(2, '0');
+            const curMins = now.getMinutes().toString().padStart(2, '0');
+            const curTime = `${curHours}:${curMins}`;
+
+            const isLive = isBooked && selectedDate === todayStr && curTime >= slot.startTime && curTime < slot.endTime;
+            const isOver = isBooked && (selectedDate < todayStr || (selectedDate === todayStr && curTime >= slot.endTime));
+
             return (
               <View
                 key={slot.id}
                 style={[
                   styles.slotCard,
-                  isBooked && styles.slotCardBooked,
+                  isLive && styles.slotCardLive,
+                  isOver && styles.slotCardGameOver,
+                  isBooked && !isLive && !isOver && styles.slotCardBooked,
                   isBlocked && styles.slotCardBlocked,
                 ]}
               >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.slotTime}>{slot.startTime} - {slot.endTime}</Text>
-                  <Text style={styles.slotPrice}>₹{slot.price}</Text>
+                  <View style={styles.priceRow}>
+                    <Text style={styles.slotPrice}>₹{slot.price}</Text>
+                    {!isBooked && (
+                      <TouchableOpacity
+                        style={styles.editPriceChip}
+                        onPress={() => handleOpenEditPrice(slot)}
+                      >
+                        <Edit3 size={11} color="#10b981" />
+                        <Text style={styles.editPriceChipText}>Edit Price</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
                   {slot.bookedByPlayerName && (
                     <Text style={styles.slotBookerText} numberOfLines={1}>
                       {slot.bookedByPlayerName}
@@ -476,9 +550,19 @@ export const OwnerSlotsScreen: React.FC = () => {
                 </View>
 
                 {isBooked ? (
-                  <View style={styles.bookedBadge}>
-                    <Text style={styles.bookedText}>RESERVED</Text>
-                  </View>
+                  isLive ? (
+                    <View style={styles.liveBadge}>
+                      <Text style={styles.liveText}>● LIVE</Text>
+                    </View>
+                  ) : isOver ? (
+                    <View style={styles.gameOverBadge}>
+                      <Text style={styles.gameOverText}>OVER</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.bookedBadge}>
+                      <Text style={styles.bookedText}>RESERVED</Text>
+                    </View>
+                  )
                 ) : (
                   <TouchableOpacity
                     style={[styles.blockBtn, isBlocked ? styles.unblockBtn : styles.blockActionBtn]}
@@ -495,6 +579,73 @@ export const OwnerSlotsScreen: React.FC = () => {
           })}
         </View>
       )}
+
+      {/* Modal: Edit Slot Price (Requirement 5: Flexibility to edit slot price after generation) */}
+      <Modal visible={!!editingSlot} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { maxWidth: 360 }]}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Edit Slot Price</Text>
+                <Text style={styles.editPriceSub}>
+                  {editingSlot?.startTime} - {editingSlot?.endTime} • {editingSlot?.date}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setEditingSlot(null)}>
+                <X size={20} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ paddingVertical: 10 }}>
+              <Text style={styles.inputLabel}>New Slot Price (₹)</Text>
+              <TextInput
+                style={[styles.modalInput, { fontSize: 20, fontWeight: '800', color: '#10b981' }]}
+                keyboardType="numeric"
+                value={newSlotPrice}
+                onChangeText={setNewSlotPrice}
+                placeholder="1500"
+                placeholderTextColor="#64748b"
+              />
+
+              <Text style={[styles.inputLabel, { marginTop: 12, marginBottom: 6 }]}>Quick Price Presets</Text>
+              <View style={styles.presetPriceRow}>
+                {[1000, 1200, 1500, 1800, 2000, 2500].map((preset) => (
+                  <TouchableOpacity
+                    key={preset}
+                    style={[styles.presetPriceBtn, newSlotPrice === String(preset) && styles.presetPriceBtnActive]}
+                    onPress={() => setNewSlotPrice(String(preset))}
+                  >
+                    <Text style={[styles.presetPriceText, newSlotPrice === String(preset) && styles.presetPriceTextActive]}>
+                      ₹{preset}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={styles.cancelModalBtn}
+                onPress={() => setEditingSlot(null)}
+              >
+                <Text style={styles.cancelModalBtnText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.savePriceBtn, savingPrice && styles.disabledBtn]}
+                disabled={savingPrice}
+                onPress={handleSaveSlotPrice}
+              >
+                {savingPrice ? (
+                  <ActivityIndicator color="#064e3b" size="small" />
+                ) : (
+                  <Text style={styles.savePriceBtnText}>Update Price</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Manual Slot Creation Modal */}
       <Modal visible={showManualModal} transparent animationType="slide">
@@ -875,6 +1026,16 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(56, 189, 248, 0.4)',
     backgroundColor: 'rgba(56, 189, 248, 0.05)',
   },
+  slotCardLive: {
+    borderColor: '#10b981',
+    backgroundColor: '#0c1a1f',
+    borderWidth: 1.5,
+  },
+  slotCardGameOver: {
+    borderColor: '#ef4444',
+    backgroundColor: '#180f14',
+    borderWidth: 1.5,
+  },
   slotCardBlocked: {
     borderColor: 'rgba(239, 68, 68, 0.4)',
     backgroundColor: 'rgba(239, 68, 68, 0.05)',
@@ -895,6 +1056,32 @@ const styles = StyleSheet.create({
     color: '#38bdf8',
     fontWeight: '600',
     marginTop: 2,
+  },
+  liveBadge: {
+    backgroundColor: '#064e3b',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#10b981',
+  },
+  liveText: {
+    fontSize: 8,
+    fontWeight: '800',
+    color: '#34d399',
+  },
+  gameOverBadge: {
+    backgroundColor: '#450a0a',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#ef4444',
+  },
+  gameOverText: {
+    fontSize: 8,
+    fontWeight: '800',
+    color: '#f87171',
   },
   bookedBadge: {
     backgroundColor: 'rgba(56, 189, 248, 0.15)',
@@ -1010,6 +1197,91 @@ const styles = StyleSheet.create({
   submitManualBtnText: {
     color: '#064e3b',
     fontSize: 14,
+    fontWeight: '800',
+  },
+  // Price Row & Edit Chip
+  priceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
+  },
+  editPriceChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.25)',
+  },
+  editPriceChipText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#10b981',
+  },
+  editPriceSub: {
+    fontSize: 11,
+    color: '#94a3b8',
+    marginTop: 2,
+  },
+  presetPriceRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  presetPriceBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: '#131b2e',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  presetPriceBtnActive: {
+    backgroundColor: '#10b981',
+    borderColor: '#10b981',
+  },
+  presetPriceText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#94a3b8',
+  },
+  presetPriceTextActive: {
+    color: '#064e3b',
+    fontWeight: '800',
+  },
+  modalActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+  },
+  cancelModalBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#1e293b',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelModalBtnText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  savePriceBtn: {
+    flex: 1.5,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#10b981',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  savePriceBtnText: {
+    color: '#064e3b',
+    fontSize: 13,
     fontWeight: '800',
   },
 });

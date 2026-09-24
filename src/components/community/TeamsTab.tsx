@@ -39,6 +39,12 @@ import {
 } from 'lucide-react';
 import { InvitePlayerModal } from './InvitePlayerModal';
 import { PublicProfileModal } from './PublicProfileModal';
+import {
+  followUserOrTeam,
+  unfollowUserOrTeam,
+  listenIsFollowing,
+} from '../../lib/db';
+import { FollowersFollowingModal } from '../profile/FollowersFollowingModal';
 
 interface TeamsTabProps {
   showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
@@ -79,6 +85,51 @@ export const TeamsTab: React.FC<TeamsTabProps> = ({ showToast }) => {
 
   // Public Profile Modal
   const [viewingPlayer, setViewingPlayer] = useState<UserProfile | null>(null);
+
+  // Follow Squad state for selected team
+  const [isFollowingSelectedTeam, setIsFollowingSelectedTeam] = useState(false);
+  const [followLoading, setFollowLoading] = useState(false);
+  const [showTeamFollowersModal, setShowTeamFollowersModal] = useState(false);
+
+  useEffect(() => {
+    if (!user?.uid || !selectedTeam?.id) {
+      setIsFollowingSelectedTeam(false);
+      return;
+    }
+    const unsub = listenIsFollowing(user.uid, selectedTeam.id, (following) => {
+      setIsFollowingSelectedTeam(following);
+    });
+    return () => unsub();
+  }, [user?.uid, selectedTeam?.id]);
+
+  const handleToggleFollowTeam = async (teamToFollow: Team) => {
+    if (!user || !profile) {
+      showToast('Please sign in to follow squads', 'error');
+      return;
+    }
+    setFollowLoading(true);
+    try {
+      if (isFollowingSelectedTeam) {
+        await unfollowUserOrTeam(user.uid, teamToFollow.id, 'TEAM');
+        showToast(`Unfollowed squad ${teamToFollow.name}`, 'info');
+      } else {
+        await followUserOrTeam({
+          follower: profile,
+          targetId: teamToFollow.id,
+          targetType: 'TEAM',
+          targetName: teamToFollow.name,
+          targetCity: teamToFollow.city,
+          targetSport: teamToFollow.sport,
+        });
+        showToast(`Now following ${teamToFollow.name}!`, 'success');
+      }
+    } catch (err: any) {
+      console.error('Follow squad error:', err);
+      showToast(err.message || 'Could not update squad follow status', 'error');
+    } finally {
+      setFollowLoading(false);
+    }
+  };
 
   // Real-time listener for Teams
   useEffect(() => {
@@ -628,13 +679,23 @@ export const TeamsTab: React.FC<TeamsTabProps> = ({ showToast }) => {
             {/* Modal Body */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
               {/* Record Cards */}
-              <div className="grid grid-cols-4 gap-2 bg-slate-950/70 border border-slate-800 p-3 rounded-xl text-center">
+              <div className="grid grid-cols-5 gap-2 bg-slate-950/70 border border-slate-800 p-3 rounded-xl text-center">
                 <div>
                   <span className="text-[10px] font-bold text-slate-500 uppercase block">Members</span>
                   <span className="text-sm font-bold text-white">
                     {selectedTeam.memberCount} / {selectedTeam.maxMembers}
                   </span>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setShowTeamFollowersModal(true)}
+                  className="hover:bg-slate-900/60 rounded-lg p-0.5 transition-colors cursor-pointer group"
+                >
+                  <span className="text-[10px] font-bold text-slate-500 uppercase block group-hover:text-indigo-400">Followers</span>
+                  <span className="text-sm font-bold text-white group-hover:text-indigo-300">
+                    {selectedTeam.followersCount || 0}
+                  </span>
+                </button>
                 <div>
                   <span className="text-[10px] font-bold text-slate-500 uppercase block">Matches</span>
                   <span className="text-sm font-bold text-indigo-300">{selectedTeam.matchesPlayed}</span>
@@ -711,12 +772,39 @@ export const TeamsTab: React.FC<TeamsTabProps> = ({ showToast }) => {
                         >
                           <div
                             onClick={async () => {
+                              if (!member.uid) return;
                               try {
                                 const snap = await getDoc(doc(db, 'users', member.uid));
                                 if (snap.exists()) {
-                                  setViewingPlayer(snap.data() as UserProfile);
+                                  setViewingPlayer({ uid: snap.id, ...snap.data() } as UserProfile);
+                                } else {
+                                  setViewingPlayer({
+                                    uid: member.uid,
+                                    email: 'athlete@trufit.app',
+                                    displayName: member.name || 'TruFit Member',
+                                    role: 'PLAYER',
+                                    emailVerified: false,
+                                    photoURL: member.photoURL,
+                                    preferredSport: selectedTeam.sport,
+                                    createdAt: new Date().toISOString(),
+                                    updatedAt: new Date().toISOString(),
+                                    isPublic: true,
+                                  } as UserProfile);
                                 }
-                              } catch (e) {}
+                              } catch (e) {
+                                setViewingPlayer({
+                                  uid: member.uid,
+                                  email: 'athlete@trufit.app',
+                                  displayName: member.name || 'TruFit Member',
+                                  role: 'PLAYER',
+                                  emailVerified: false,
+                                  photoURL: member.photoURL,
+                                  preferredSport: selectedTeam.sport,
+                                  createdAt: new Date().toISOString(),
+                                  updatedAt: new Date().toISOString(),
+                                  isPublic: true,
+                                } as UserProfile);
+                              }
                             }}
                             className="flex items-center gap-2.5 min-w-0 cursor-pointer group"
                           >
@@ -811,6 +899,33 @@ export const TeamsTab: React.FC<TeamsTabProps> = ({ showToast }) => {
               </span>
 
               <div className="flex items-center gap-2">
+                {/* Follow / Following Squad Button */}
+                <button
+                  type="button"
+                  id="btn-follow-squad-toggle"
+                  disabled={followLoading}
+                  onClick={() => handleToggleFollowTeam(selectedTeam)}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    isFollowingSelectedTeam
+                      ? 'bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-300 border border-slate-700'
+                      : 'bg-indigo-600/30 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/40'
+                  }`}
+                >
+                  {followLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : isFollowingSelectedTeam ? (
+                    <>
+                      <UserCheck className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Following Squad</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Follow Squad</span>
+                    </>
+                  )}
+                </button>
+
                 {myTeamMemberships.has(selectedTeam.id) ? (
                   <>
                     <span className="px-3 py-2 bg-indigo-950 text-indigo-300 border border-indigo-500/30 rounded-xl text-xs font-bold flex items-center gap-1">
@@ -1001,6 +1116,17 @@ export const TeamsTab: React.FC<TeamsTabProps> = ({ showToast }) => {
         isOpen={!!viewingPlayer}
         onClose={() => setViewingPlayer(null)}
       />
+
+      {selectedTeam && (
+        <FollowersFollowingModal
+          isOpen={showTeamFollowersModal}
+          onClose={() => setShowTeamFollowersModal(false)}
+          targetId={selectedTeam.id}
+          targetName={selectedTeam.name}
+          initialTab="followers"
+          showToast={(msg, type) => showToast(msg, type || 'info')}
+        />
+      )}
     </div>
   );
 };

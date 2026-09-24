@@ -8,19 +8,25 @@ interface Coordinates {
 
 interface LocationContextType {
   location: Coordinates | null;
+  userLocation: Coordinates | null;
   city: string;
+  setCity: (city: string) => void;
   hasPermission: boolean;
   requestPermission: () => Promise<void>;
-  calculateDistance: (lat: number, lng: number) => number | null;
+  calculateDistance: (lat: number, lng: number, lat2?: number, lng2?: number) => number | null;
+  calculateDistanceKm: (lat: number, lng: number, lat2?: number, lng2?: number) => number | null;
   formatDistance: (lat: number, lng: number) => string;
 }
 
 const LocationContext = createContext<LocationContextType>({
   location: null,
+  userLocation: null,
   city: 'Mumbai',
+  setCity: () => {},
   hasPermission: false,
   requestPermission: async () => {},
   calculateDistance: () => null,
+  calculateDistanceKm: () => null,
   formatDistance: () => '',
 });
 
@@ -61,15 +67,27 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, []);
 
   // Haversine formula in kilometers
-  const calculateDistance = (lat: number, lng: number): number | null => {
-    if (!location) return null;
+  const calculateDistance = (lat: number, lng: number, lat2?: number, lng2?: number): number | null => {
+    let sourceLat = location ? location.latitude : null;
+    let sourceLng = location ? location.longitude : null;
+    let destLat = lat;
+    let destLng = lng;
+
+    if (lat2 !== undefined && lng2 !== undefined) {
+      sourceLat = lat;
+      sourceLng = lng;
+      destLat = lat2;
+      destLng = lng2;
+    }
+
+    if (sourceLat === null || sourceLng === null) return null;
     const toRad = (x: number) => (x * Math.PI) / 180;
     const R = 6371; // Earth radius in km
-    const dLat = toRad(lat - location.latitude);
-    const dLon = toRad(lng - location.longitude);
+    const dLat = toRad(destLat - sourceLat);
+    const dLon = toRad(destLng - sourceLng);
     const a =
       Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(toRad(location.latitude)) * Math.cos(toRad(lat)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      Math.cos(toRad(sourceLat)) * Math.cos(toRad(destLat)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
   };
@@ -85,10 +103,13 @@ export const LocationProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     <LocationContext.Provider
       value={{
         location,
+        userLocation: location,
         city,
+        setCity,
         hasPermission,
         requestPermission,
         calculateDistance,
+        calculateDistanceKm: calculateDistance,
         formatDistance,
       }}
     >

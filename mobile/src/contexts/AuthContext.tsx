@@ -12,6 +12,7 @@ import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase/config';
 import { UserProfile, UserRole } from '../types';
 import { sanitizeData } from '../services/dbService';
+import { registerDevicePushToken } from '../services/pushNotificationService';
 
 interface AuthContextType {
   user: User | null;
@@ -74,6 +75,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         await setDoc(userDocRef, sanitizeData(newProfile), { merge: true });
         setProfile(newProfile);
       }
+
+      // Automatically register and sync mobile push token
+      registerDevicePushToken(fbUser.uid).catch((e) => {
+        console.warn('Silent push token register:', e?.message || e);
+      });
     } catch (err: any) {
       console.warn('Could not fetch Firestore profile, creating local session:', err?.message || err);
       const fallback: UserProfile = {

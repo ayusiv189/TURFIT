@@ -11,15 +11,88 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Default deny
+    function isBlocked(userA, userB) {
+      return exists(/databases/$(database)/documents/blocks/$(userA + "_" + userB)) ||
+             exists(/databases/$(database)/documents/blocks/$(userB + "_" + userA));
+    }
+
+    function isRestricted(userA, userB) {
+      return exists(/databases/$(database)/documents/restrictions/$(userA + "_" + userB)) ||
+             exists(/databases/$(database)/documents/restrictions/$(userB + "_" + userA));
+    }
+
+    function isFollower(followerId, targetId) {
+      return exists(/databases/$(database)/documents/follows/$(followerId + "_" + targetId));
+    }
+
+    function isUserMessagingEnabled(uid) {
+      return !exists(/databases/$(database)/documents/userControls/$(uid)) ||
+             get(/databases/$(database)/documents/userControls/$(uid)).data.get('messagingEnabled', true) == true;
+    }
+
+    function canMessage(senderId, recipientId) {
+      // 1. Both sender and recipient must have messaging enabled by admin
+      let senderAllowed = isUserMessagingEnabled(senderId);
+      let recipientAllowed = isUserMessagingEnabled(recipientId);
+
+      // 2. Basic block and restriction checks
+      let notBlocked = !isBlocked(senderId, recipientId) && !isRestricted(senderId, recipientId);
+      
+      // 3. User existence and suspension check
+      let recipientExists = exists(/databases/$(database)/documents/users/$(recipientId));
+      let recipient = recipientExists ? get(/databases/$(database)/documents/users/$(recipientId)).data : {};
+      let notSuspended = recipient.get('verificationStatus', '') != 'suspended';
+
+      // 4. Privacy checks
+      let privacy = recipient.get('privacySettings', {});
+      let allowDMs = privacy.get('allowDirectMessages', 'EVERYONE');
+      let profileVisibility = privacy.get('profileVisibility', 'PUBLIC');
+
+      let satisfiesPrivacy = 
+        !recipientExists ||
+        allowDMs == 'EVERYONE' || allowDMs == true ||
+        (allowDMs == 'FOLLOWERS' && isFollower(senderId, recipientId)) ||
+        (profileVisibility == 'PRIVATE' && isFollower(senderId, recipientId));
+
+      return senderAllowed && recipientAllowed && notBlocked && notSuspended && satisfiesPrivacy;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+             (('email' in request.auth.token && request.auth.token.email != null && request.auth.token.email.lower() == 'ayusiv189@gmail.com') ||
+              (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+               (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'ADMIN' ||
+                get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isAdmin', false) == true)));
+    }
+
+    // Default deny with Admin override
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if isAdmin();
     }
 
     // Users
     match /users/{userId} {
       allow read: if true;
-      allow write: if isOwnerOf(userId);
+      allow create: if isOwnerOf(userId);
+      allow update, delete: if isOwnerOf(userId);
+    }
+
+    // Blocks
+    match /blocks/{blockId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // Reports
+    match /reports/{reportId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // Restrictions
+    match /restrictions/{restrictionId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
     }
 
     // Turfs & Verification
@@ -83,10 +156,20 @@ service cloud.firestore {
       allow write: if isAuthenticated();
     }
 
+    match /payment_webhooks/{webhookId} {
+      allow read, write: if true;
+    }
+
     // Lobbies & Lobby Players & Invitations
     match /lobbies/{lobbyId} {
       allow read: if true;
       allow write: if isAuthenticated();
+
+      // Auto-expiring ephemeral squad chat messages
+      match /messages/{messageId} {
+        allow read: if true;
+        allow write, delete: if isAuthenticated();
+      }
     }
 
     match /lobbyPlayers/{playerId} {
@@ -203,11 +286,226 @@ service cloud.firestore {
       allow write: if isAuthenticated();
     }
 
+    // Financial Ledgers & Auditing
+    match /financialLedgers/{ledgerId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
     // Refunds
     match /refunds/{refundId} {
       allow read: if true;
       allow write: if isAuthenticated();
     }
+
+    // Post-match Player Ratings, Sportsmanship Badges & Stats
+    match /playerRatings/{ratingId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Settings & Global Tab Visibilities
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Promotional Banners
+    match /promotionalBanners/{bannerId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Config & Feature Flags
+    match /config/{docId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /system_config/{docId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /featureFlags/{docId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Subscriptions & Plans & Transactions (Owner & Coach & Player)
+    match /subscriptions/{subId} {
+      allow read, write: if true;
+    }
+
+    match /subscriptionPlans/{planId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /ownerSubscriptions/{subId} {
+      allow read, write: if true;
+    }
+
+    match /subscriptionTransactions/{txId} {
+      allow read, write: if true;
+    }
+
+    match /coachSubscriptionPlans/{planId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Player SaaS Subscriptions & Plans
+    match /playerSubscriptionPlans/{planId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /playerSubscriptions/{userId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /playerSubscriptionTransactions/{txId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // Verification Badges & Badges System
+    match /playerVerificationBadges/{userId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Audit Logs (Append-only)
+    match /subscriptionAuditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
+    match /verificationAuditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update, delete: if false;
+    }
+
+    // Admin Config & Settings
+    match /adminConfig/{docId} {
+      allow read, write: if true;
+    }
+
+    match /adminSettings/{docId} {
+      allow read, write: if true;
+    }
+
+    // User Controls (Features and restrictions)
+    match /userControls/{uid} {
+      allow read: if isAuthenticated() && (request.auth.uid == uid || isAdmin());
+      allow write: if isAdmin();
+    }
+
+    // Settings (Global features and restrictions)
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Owner Payout Requests & Ledger
+    match /ownerPayoutRequests/{id} {
+      allow read, write: if true;
+    }
+
+    match /ownerPayouts/{id} {
+      allow read, write: if true;
+    }
+
+    // ==========================================
+    // 1. COACH & ACADEMY HUB
+    // ==========================================
+    match /coaches/{coachId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /coachBatches/{batchId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /coachEnrollments/{enrollmentId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 2. OPEN COMMUNITY & 3. CORPORATE TOURNAMENTS
+    // ==========================================
+    match /tournaments/{tournamentId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /tournamentTeams/{teamId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    match /tournamentFixtures/{fixtureId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 4. SOCIAL MEDIA PLATFORM (FEED & OWNER BRAND PROFILES)
+    // ==========================================
+    match /socialPosts/{postId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.auth.uid == request.resource.data.authorId;
+      allow update: if isAuthenticated() && (request.resource.data.authorId == resource.data.authorId);
+      allow delete: if isAuthenticated() && request.auth.uid == resource.data.authorId;
+    }
+
+    match /ownerBrandProfiles/{profileId} {
+      allow read: if true;
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 5. SOCIAL FOLLOW / FOLLOWING RELATIONSHIPS
+    // ==========================================
+    match /follows/{followId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.auth.uid == request.resource.data.followerId && request.auth.uid != request.resource.data.targetId;
+      allow delete: if isAuthenticated() && (request.auth.uid == resource.data.followerId);
+      allow update: if false;
+    }
+
+    // ==========================================
+    // 6. TRUFIT DIRECT MESSAGING SYSTEM (PHASE M1)
+    // ==========================================
+    match /direct_conversations/{convId} {
+      allow read: if isAuthenticated() && (resource == null || (request.auth.uid in resource.data.participants) || isAdmin());
+      allow create: if isAuthenticated() && 
+                    (request.auth.uid in request.resource.data.participants) &&
+                    (request.resource.data.participants.size() == 2) &&
+                    (isAdmin() || canMessage(request.auth.uid, request.resource.data.participants[0] == request.auth.uid ? request.resource.data.participants[1] : request.resource.data.participants[0]));
+      allow update: if isAuthenticated() && ((request.auth.uid in resource.data.participants) || isAdmin());
+      allow delete: if isAuthenticated() && 
+                    (isAdmin() || (request.auth.uid in resource.data.participants));
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && (isAdmin() || (exists(/databases/$(database)/documents/direct_conversations/$(convId)) && (request.auth.uid in get(/databases/$(database)/documents/direct_conversations/$(convId)).data.participants)));
+        allow create: if isAuthenticated() && 
+                      (request.auth.uid == request.resource.data.senderId) &&
+                      exists(/databases/$(database)/documents/direct_conversations/$(convId)) &&
+                      (request.auth.uid in get(/databases/$(database)/documents/direct_conversations/$(convId)).data.participants) && 
+                      (isAdmin() || canMessage(request.auth.uid, get(/databases/$(database)/documents/direct_conversations/$(convId)).data.participants[0] == request.auth.uid ? get(/databases/$(database)/documents/direct_conversations/$(convId)).data.participants[1] : get(/databases/$(database)/documents/direct_conversations/$(convId)).data.participants[0]));
+        allow update: if isAuthenticated() && (isAdmin() || (exists(/databases/$(database)/documents/direct_conversations/$(convId)) && (request.auth.uid in get(/databases/$(database)/documents/direct_conversations/$(convId)).data.participants)));
+        allow delete: if isAuthenticated() && (isAdmin() || (exists(/databases/$(database)/documents/direct_conversations/$(convId)) && (request.auth.uid in get(/databases/$(database)/documents/direct_conversations/$(convId)).data.participants)));
+      }
+    }
   }
 }
+
 

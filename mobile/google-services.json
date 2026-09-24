@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "225029913892",
+    "project_id": "trufit-903e2",
+    "storage_bucket": "trufit-903e2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:225029913892:android:com_turfit_sportsapp",
+        "android_client_info": {
+          "package_name": "com.turfit.sportsapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBD6sRLGsIZN1l0MEtNtXFbOyB1PGmeM1g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

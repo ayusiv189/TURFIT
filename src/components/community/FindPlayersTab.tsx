@@ -21,9 +21,10 @@ import { InvitePlayerModal } from './InvitePlayerModal';
 
 interface FindPlayersTabProps {
   showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
+  selectedCity?: string;
 }
 
-export const FindPlayersTab: React.FC<FindPlayersTabProps> = ({ showToast }) => {
+export const FindPlayersTab: React.FC<FindPlayersTabProps> = ({ showToast, selectedCity: propsSelectedCity }) => {
   const { user, profile } = useAuth();
 
   const [players, setPlayers] = useState<UserProfile[]>([]);
@@ -33,7 +34,13 @@ export const FindPlayersTab: React.FC<FindPlayersTabProps> = ({ showToast }) => 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSport, setSelectedSport] = useState('All');
   const [selectedLevel, setSelectedLevel] = useState('All');
-  const [selectedCity, setSelectedCity] = useState('All');
+  const [selectedCity, setSelectedCity] = useState(() => (propsSelectedCity && propsSelectedCity !== 'ALL' ? propsSelectedCity : 'All'));
+
+  useEffect(() => {
+    if (propsSelectedCity && propsSelectedCity !== 'ALL') {
+      setSelectedCity(propsSelectedCity);
+    }
+  }, [propsSelectedCity]);
 
   // Modals
   const [viewingPlayer, setViewingPlayer] = useState<UserProfile | null>(null);
@@ -205,7 +212,7 @@ export const FindPlayersTab: React.FC<FindPlayersTabProps> = ({ showToast }) => 
           <p className="text-xs text-slate-400 max-w-sm mx-auto mb-3 leading-relaxed">
             {searchQuery || selectedSport !== 'All' || selectedLevel !== 'All'
               ? 'Try modifying your search keywords or filter criteria.'
-              : 'You are among the first athletes registered in this region! Invite friends to join TruFit.'}
+              : 'You are among the first athletes registered in this region! Invite friends to join TurFit.'}
           </p>
         </div>
       ) : (
@@ -227,7 +234,7 @@ export const FindPlayersTab: React.FC<FindPlayersTabProps> = ({ showToast }) => 
                       />
                     ) : (
                       <div className="w-12 h-12 rounded-2xl bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 font-bold text-base flex items-center justify-center flex-shrink-0">
-                        {player.displayName.charAt(0).toUpperCase()}
+                        {(player.displayName || 'P').charAt(0).toUpperCase()}
                       </div>
                     )}
                     <div className="min-w-0">

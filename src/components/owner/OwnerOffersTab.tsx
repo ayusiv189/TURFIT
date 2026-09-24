@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Offer, Turf, Arena } from '../../types';
+import { Offer, Turf, Arena, PlanFeatureConfig } from '../../types';
 import { createOffer, getOwnerOffers } from '../../lib/phase3';
 import { getOwnerTurfs, getTurfArenas } from '../../lib/db';
 import { formatCurrency, formatDateString } from '../../lib/utils';
@@ -16,20 +16,23 @@ import {
   X,
   ToggleLeft,
   ToggleRight,
+  Lock,
 } from 'lucide-react';
 import { doc, updateDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 
 interface OwnerOffersTabProps {
   showToast?: (text: string, type?: 'success' | 'error') => void;
+  turfs?: Turf[];
+  planFeatures?: PlanFeatureConfig;
 }
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
-export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => {
+export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast, turfs: propTurfs, planFeatures }) => {
   const { user } = useAuth();
   const [offers, setOffers] = useState<Offer[]>([]);
-  const [turfs, setTurfs] = useState<Turf[]>([]);
+  const [turfs, setTurfs] = useState<Turf[]>(propTurfs || []);
   const [arenas, setArenas] = useState<Arena[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -41,8 +44,6 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
   const [offerDesc, setOfferDesc] = useState<string>('');
   const [discountType, setDiscountType] = useState<'PERCENTAGE' | 'FIXED'>('PERCENTAGE');
   const [discountValue, setDiscountValue] = useState<number>(10);
-  const [minBookingAmount, setMinBookingAmount] = useState<number>(1000);
-  const [maxDiscount, setMaxDiscount] = useState<number>(250);
   const [startDate, setStartDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [endDate, setEndDate] = useState<string>(() => {
     const d = new Date();
@@ -50,8 +51,9 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
     return d.toISOString().split('T')[0];
   });
   const [selectedTurfId, setSelectedTurfId] = useState<string>('ALL');
+  const [selectedArenaId, setSelectedArenaId] = useState<string>('ALL');
   const [selectedDays, setSelectedDays] = useState<string[]>([]);
-  const [usageLimit, setUsageLimit] = useState<number>(100);
+  const [usageLimit, setUsageLimit] = useState<number>(50);
 
   const loadOffers = async () => {
     if (!user) return;
@@ -62,7 +64,9 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
         getOwnerTurfs(user.uid),
       ]);
       setOffers(ownerOffers);
-      setTurfs(ownerTurfs);
+      if (!propTurfs) {
+        setTurfs(ownerTurfs);
+      }
     } catch (err) {
       console.error('Failed to load offers', err);
     } finally {
@@ -72,7 +76,26 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
 
   useEffect(() => {
     loadOffers();
-  }, [user]);
+  }, [user, propTurfs]);
+
+  // Fetch arenas when selectedTurfId changes
+  useEffect(() => {
+    const loadArenasForTurf = async () => {
+      if (selectedTurfId === 'ALL') {
+        setArenas([]);
+        setSelectedArenaId('ALL');
+        return;
+      }
+      try {
+        const turfArenas = await getTurfArenas(selectedTurfId);
+        setArenas(turfArenas);
+        setSelectedArenaId('ALL');
+      } catch (err) {
+        console.error('Failed to load arenas for selected turf:', err);
+      }
+    };
+    loadArenasForTurf();
+  }, [selectedTurfId]);
 
   const toggleDay = (day: string) => {
     if (selectedDays.includes(day)) {
@@ -93,22 +116,27 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
     setActionLoading(true);
     try {
       const selectedTurfObj = turfs.find((t) => t.id === selectedTurfId);
+      const selectedArenaObj = arenas.find((a) => a.id === selectedArenaId);
+
+      // Force arena to ALL if feature is locked/disabled
+      const finalArenaId = planFeatures?.individualArenaOffers === false ? 'ALL' : selectedArenaId;
+      const finalArenaObj = planFeatures?.individualArenaOffers === false ? null : selectedArenaObj;
+
       await createOffer({
         ownerId: user.uid,
         turfId: selectedTurfId,
         turfName: selectedTurfObj ? selectedTurfObj.name : 'All Turfs',
-        arenaId: 'ALL',
+        arenaId: finalArenaId,
+        arenaName: finalArenaObj ? finalArenaObj.name : 'All Arenas',
         code: offerCode.trim().toUpperCase(),
         name: offerName.trim(),
         description: offerDesc.trim(),
         discountType,
         discountValue,
-        minBookingAmount,
-        maxDiscount: discountType === 'PERCENTAGE' ? maxDiscount : undefined,
         startDate,
         endDate,
         applicableDays: selectedDays.length > 0 ? selectedDays : undefined,
-        usageLimit,
+        usageLimit: usageLimit || 50,
         active: true,
       });
 
@@ -118,6 +146,8 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
       setOfferCode('');
       setOfferName('');
       setOfferDesc('');
+      setSelectedTurfId('ALL');
+      setSelectedArenaId('ALL');
       await loadOffers();
     } catch (err: any) {
       showToast?.(err.message || 'Failed to create offer', 'error');
@@ -238,6 +268,12 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
                   <span>Applicable Turf:</span>
                   <span className="text-white font-medium">{offer.turfName || 'All Turfs'}</span>
                 </div>
+                {offer.arenaId && offer.arenaId !== 'ALL' && (
+                  <div className="flex justify-between">
+                    <span>Applicable Arena:</span>
+                    <span className="text-pink-400 font-bold">{offer.arenaName || 'Specific Arena'}</span>
+                  </div>
+                )}
                 {offer.applicableDays && offer.applicableDays.length > 0 && (
                   <div className="flex justify-between">
                     <span>Days:</span>
@@ -368,30 +404,19 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-400 mb-1">Min Booking (₹)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={minBookingAmount}
-                    onChange={(e) => setMinBookingAmount(Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                  />
-                </div>
-
-                {discountType === 'PERCENTAGE' && (
-                  <div>
-                    <label className="block text-[11px] font-medium text-slate-400 mb-1">Max Cap (₹)</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={maxDiscount}
-                      onChange={(e) => setMaxDiscount(Number(e.target.value))}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                    />
-                  </div>
-                )}
+              <div>
+                <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                  Usage Limit (Max Total Redemptions)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={usageLimit}
+                  onChange={(e) => setUsageLimit(Number(e.target.value))}
+                  placeholder="e.g. 50"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white font-bold"
+                  required
+                />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -432,6 +457,34 @@ export const OwnerOffersTab: React.FC<OwnerOffersTabProps> = ({ showToast }) => 
                   ))}
                 </select>
               </div>
+
+              {selectedTurfId !== 'ALL' && (
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-400 mb-1 flex items-center justify-between">
+                    <span>Applicable Arena / Gaming Zone</span>
+                    {planFeatures?.individualArenaOffers === false && (
+                      <span className="text-[9px] font-black uppercase text-amber-500 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+                        <Lock className="w-2.5 h-2.5" /> Gated (Pro Plan Only)
+                      </span>
+                    )}
+                  </label>
+                  <select
+                    value={selectedArenaId}
+                    onChange={(e) => setSelectedArenaId(e.target.value)}
+                    disabled={planFeatures?.individualArenaOffers === false}
+                    className={`w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white ${
+                      planFeatures?.individualArenaOffers === false ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
+                  >
+                    <option value="ALL">All Arenas / Gaming Zones</option>
+                    {arenas.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name} ({a.sport})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-[11px] font-medium text-slate-400 mb-1.5">

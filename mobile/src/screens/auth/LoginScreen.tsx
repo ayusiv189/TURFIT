@@ -55,7 +55,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
           <View style={styles.iconCircle}>
             <Zap size={32} color="#10b981" />
           </View>
-          <Text style={styles.appName}>TRUFIT</Text>
+          <Text style={styles.appName}>TURFIT</Text>
           <Text style={styles.tagline}>Welcome back to your sports hub</Text>
         </View>
 
@@ -74,7 +74,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
               <Mail size={18} color="#94a3b8" />
               <TextInput
                 style={styles.input}
-                placeholder="athlete@trufit.com"
+                placeholder="athlete@turfit.com"
                 placeholderTextColor="#64748b"
                 value={email}
                 onChangeText={setEmail}

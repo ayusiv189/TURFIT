@@ -4,34 +4,54 @@ import { Slot } from '../types';
 
 interface SlotChipProps {
   slot: Slot;
-  selected: boolean;
-  onPress: () => void;
+  selected?: boolean;
+  isSelected?: boolean;
+  onPress?: () => void;
+  onSelect?: (slot: Slot) => void;
 }
 
-export const SlotChip: React.FC<SlotChipProps> = ({ slot, selected, onPress }) => {
+export const SlotChip: React.FC<SlotChipProps> = ({
+  slot,
+  selected,
+  isSelected,
+  onPress,
+  onSelect,
+}) => {
   const isAvailable = slot.status === 'AVAILABLE';
+  const isCurrentlySelected = Boolean(isSelected ?? selected);
+
+  const handlePress = () => {
+    if (onSelect) {
+      onSelect(slot);
+    }
+    if (onPress) {
+      onPress();
+    }
+  };
 
   return (
     <TouchableOpacity
       activeOpacity={0.8}
       disabled={!isAvailable}
-      onPress={onPress}
+      onPress={handlePress}
       style={[
         styles.chip,
         isAvailable ? styles.availableChip : styles.bookedChip,
-        selected && styles.selectedChip,
+        isCurrentlySelected && styles.selectedChip,
       ]}
     >
-      <Text style={[styles.timeText, selected && styles.selectedText, !isAvailable && styles.bookedText]}>
+      <Text style={[styles.timeText, isCurrentlySelected && styles.selectedText, !isAvailable && styles.bookedText]}>
         {slot.startTime} - {slot.endTime}
       </Text>
       <View style={styles.bottomRow}>
-        <Text style={[styles.priceText, selected && styles.selectedText, !isAvailable && styles.bookedText]}>
+        <Text style={[styles.priceText, isCurrentlySelected && styles.selectedText, !isAvailable && styles.bookedPriceText]}>
           ₹{slot.price}
         </Text>
-        <Text style={[styles.statusText, isAvailable ? styles.availableStatus : styles.bookedStatus]}>
-          {isAvailable ? 'AVAILABLE' : 'BOOKED'}
-        </Text>
+        <View style={isAvailable ? styles.availableBadge : styles.bookedBadge}>
+          <Text style={isAvailable ? styles.availableStatus : styles.bookedStatus}>
+            {isAvailable ? 'AVAILABLE' : 'RESERVED'}
+          </Text>
+        </View>
       </View>
     </TouchableOpacity>
   );
@@ -50,9 +70,8 @@ const styles = StyleSheet.create({
     borderColor: '#334155',
   },
   bookedChip: {
-    backgroundColor: 'rgba(30, 41, 59, 0.4)',
-    borderColor: '#1e293b',
-    opacity: 0.6,
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+    borderColor: 'rgba(239, 68, 68, 0.45)',
   },
   selectedChip: {
     backgroundColor: '#064e3b',
@@ -68,7 +87,11 @@ const styles = StyleSheet.create({
     color: '#ffffff',
   },
   bookedText: {
-    color: '#64748b',
+    color: '#fca5a5',
+  },
+  bookedPriceText: {
+    color: '#94a3b8',
+    textDecorationLine: 'line-through',
   },
   bottomRow: {
     flexDirection: 'row',
@@ -80,6 +103,20 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#10b981',
   },
+  availableBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  bookedBadge: {
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 0.5,
+    borderColor: '#ef4444',
+  },
   statusText: {
     fontSize: 9,
     fontWeight: '800',
@@ -87,8 +124,14 @@ const styles = StyleSheet.create({
   },
   availableStatus: {
     color: '#10b981',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
   bookedStatus: {
     color: '#ef4444',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
 });

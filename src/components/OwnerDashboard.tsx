@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Turf, Arena, Slot, Booking } from '../types';
+import { Turf, Arena, Slot, Booking, LobbyPlayer, PlanFeatureConfig, DEFAULT_PLAN_FEATURES, OwnerBrandProfile } from '../types';
 import {
   getOwnerTurfs,
   getOwnerSlots,
@@ -8,6 +8,8 @@ import {
   createTurf,
   updateTurf,
   deleteTurf,
+  checkTurfActiveBookings,
+  checkArenaActiveBookings,
   createArena,
   getTurfArenas,
   deleteArena,
@@ -20,6 +22,10 @@ import {
   generate7DaySlots,
   toggleArenaMaintenance,
   toggleTurfClosedStatus,
+  isLobbyBooking,
+  getLobbyParticipants,
+  getEffectiveOwnerPlanFeatures,
+  listenOwnerBrandProfile,
 } from '../lib/db';
 import {
   formatCurrency,
@@ -29,8 +35,8 @@ import {
   getNextDays,
   formatTime24to12,
   readFileAsDataURL,
+  sortSlotsChronologically,
 } from '../lib/utils';
-import { InteractiveTurfMap } from './InteractiveTurfMap';
 import { OwnerAnalyticsDashboard } from './owner/OwnerAnalyticsDashboard';
 import { OwnerPlayerDues } from './owner/OwnerPlayerDues';
 import { OwnerOffersTab } from './owner/OwnerOffersTab';
@@ -39,6 +45,15 @@ import { RecurringSlotsModal } from './owner/RecurringSlotsModal';
 import { SevenDaySlotsModal } from './owner/SevenDaySlotsModal';
 import { OwnerPaymentSettingsTab } from './owner/OwnerPaymentSettingsTab';
 import { OwnerVerificationCard } from './owner/OwnerVerificationCard';
+import { EditArenaModal } from './owner/EditArenaModal';
+import { OwnerSubscriptionTab } from './owner/OwnerSubscriptionTab';
+import { OwnerBrandProfileTab } from './owner/OwnerBrandProfileTab';
+import { OwnerBrandProfileModal } from './social/OwnerBrandProfileModal';
+import { SocialProfileView } from './profile/SocialProfileView';
+import { SocialProfileModal } from './profile/SocialProfileModal';
+import { DirectMessagesInboxModal } from './messaging/DirectMessagesInboxModal';
+import { subscribeUserConversations } from '../lib/directMessagingService';
+import { PromotionalBannerCarousel } from './PromotionalBannerCarousel';
 import {
   Building2,
   Calendar,
@@ -71,7 +86,25 @@ import {
   Power,
   Ban,
   QrCode,
+  UserX,
+  ChevronDown,
+  ChevronUp,
+  X as XIcon,
+  Trophy,
+  User,
+  Phone,
+  Pencil,
+  ExternalLink,
+  Banknote,
+  ToggleLeft,
+  ToggleRight,
+  Sparkles,
+  MessageSquare,
 } from 'lucide-react';
+import {
+  openWhatsAppNotification,
+  copyWhatsAppMessage,
+} from '../lib/whatsappService';
 
 interface OwnerDashboardProps {
   currentTab:
@@ -85,12 +118,14 @@ interface OwnerDashboardProps {
     | 'reviews'
     | 'payments'
     | 'payouts'
+    | 'subscription'
+    | 'brand-profile'
     | 'profile';
   setCurrentTab: (tab: any) => void;
 }
 
 export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setCurrentTab }) => {
-  const { user, profile, updateUserProfile } = useAuth();
+  const { user, profile, updateUserProfile, isAdmin, setActiveRole } = useAuth();
 
   // Primary Data State from Firestore
   const [turfs, setTurfs] = useState<Turf[]>([]);
@@ -103,6 +138,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const [loading, setLoading] = useState<boolean>(true);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [planFeatures, setPlanFeatures] = useState<PlanFeatureConfig>(DEFAULT_PLAN_FEATURES);
 
   // Forms and Modals
   const [showAddTurfModal, setShowAddTurfModal] = useState<boolean>(false);
@@ -114,12 +150,47 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const [slotViewMode, setSlotViewMode] = useState<'daily' | 'weekly'>('daily');
   const [selectedSlotDate, setSelectedSlotDate] = useState<string>(getTodayDateString());
 
-  // Add Turf Form Fields
+  // Bookings Filter & Roster View States
+  const [bookingSearchTerm, setBookingSearchTerm] = useState<string>('');
+  const [bookingDateFilter, setBookingDateFilter] = useState<string>('ALL');
+  const [bookingStatusFilter, setBookingStatusFilter] = useState<'ALL' | 'PENDING' | 'LIVE' | 'OVER' | 'NOSHOW' | 'CANCELLED'>('ALL');
+  const [bookingSourceFilter, setBookingSourceFilter] = useState<'ALL' | 'INDIVIDUAL' | 'LOBBY'>('ALL');
+  const [expandedBookingRosterId, setExpandedBookingRosterId] = useState<string | null>(null);
+  const [lobbyPlayersMap, setLobbyPlayersMap] = useState<Record<string, LobbyPlayer[]>>({});
+  const [loadingRosterMap, setLoadingRosterMap] = useState<Record<string, boolean>>({});
+
+  // Owner Profile Sub-tab & Brand Page State
+  const [ownerProfileTab, setOwnerProfileTab] = useState<'profile' | 'brand'>('profile');
+  const [brandProfile, setBrandProfile] = useState<OwnerBrandProfile | null>(null);
+  const [isPreviewBrandOpen, setIsPreviewBrandOpen] = useState<boolean>(false);
+  const [viewUserProfileId, setViewUserProfileId] = useState<string | null>(null);
+
+  const handleToggleBookingRoster = async (b: Booking) => {
+    if (expandedBookingRosterId === b.id) {
+      setExpandedBookingRosterId(null);
+      return;
+    }
+    setExpandedBookingRosterId(b.id);
+    if (isLobbyBooking(b) && b.lobbyId && !lobbyPlayersMap[b.lobbyId]) {
+      setLoadingRosterMap((prev) => ({ ...prev, [b.lobbyId!]: true }));
+      try {
+        const participants = await getLobbyParticipants(b.lobbyId);
+        setLobbyPlayersMap((prev) => ({ ...prev, [b.lobbyId!]: participants }));
+      } catch (err) {
+        console.error('Error fetching lobby participants for roster:', err);
+      } finally {
+        setLoadingRosterMap((prev) => ({ ...prev, [b.lobbyId!]: false }));
+      }
+    }
+  };
+
+  // Add & Edit Turf Form Fields
   const [turfName, setTurfName] = useState<string>('');
   const [turfDesc, setTurfDesc] = useState<string>('');
   const [turfAddress, setTurfAddress] = useState<string>('');
   const [turfArea, setTurfArea] = useState<string>('');
   const [turfCity, setTurfCity] = useState<string>('Mumbai');
+  const [turfLocationUrl, setTurfLocationUrl] = useState<string>('');
   const [turfPhone, setTurfPhone] = useState<string>(profile?.phoneNumber || '');
   const [turfOpenTime, setTurfOpenTime] = useState<string>('06:00');
   const [turfCloseTime, setTurfCloseTime] = useState<string>('23:00');
@@ -134,10 +205,36 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const [turfLat, setTurfLat] = useState<number>(19.076);
   const [turfLng, setTurfLng] = useState<number>(72.8777);
   const [turfPhotos, setTurfPhotos] = useState<string[]>([]);
+  const [turfAllowPayAtVenue, setTurfAllowPayAtVenue] = useState<boolean>(true);
+  const [editingTurf, setEditingTurf] = useState<Turf | null>(null);
+  const [showEditTurfModal, setShowEditTurfModal] = useState<boolean>(false);
+
+  // Direct Messaging Inbox State
+  const [showDirectMessagesInboxModal, setShowDirectMessagesInboxModal] = useState<boolean>(false);
+  const [unreadDirectMessagesCount, setUnreadDirectMessagesCount] = useState<number>(0);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    const unsub = subscribeUserConversations(user.uid, (convs) => {
+      const totalUnread = convs.reduce((sum, c) => sum + (c.unreadCount?.[user.uid] || 0), 0);
+      setUnreadDirectMessagesCount(totalUnread);
+    });
+    return () => unsub();
+  }, [user?.uid]);
+
+  // Facility Category for Turf / Gaming Zone creation
+  const [turfFacilityCategory, setTurfFacilityCategory] = useState<'OUTDOOR_TURF' | 'INDOOR_GAME'>('OUTDOOR_TURF');
+  const [turfIndoorGameType, setTurfIndoorGameType] = useState<string>('Pool');
 
   // Add Arena Form Fields
+  const [arenaFacilityType, setArenaFacilityType] = useState<'OUTDOOR_TURF' | 'INDOOR_GAME'>('OUTDOOR_TURF');
+  const [arenaIndoorGame, setArenaIndoorGame] = useState<string>('Pool');
+  const [arenaHasAC, setArenaHasAC] = useState<boolean>(true);
+  const [arenaHasLounge, setArenaHasLounge] = useState<boolean>(true);
+  const [arenaEquipment, setArenaEquipment] = useState<string[]>(['Standard Equipment Provided', 'Sanitized Gear']);
   const [arenaName, setArenaName] = useState<string>('');
   const [arenaSport, setArenaSport] = useState<string>('Football');
+  const [arenaSports, setArenaSports] = useState<string[]>(['Football']);
   const [arenaDesc, setArenaDesc] = useState<string>('');
   const [arenaCapacity, setArenaCapacity] = useState<number>(14);
   const [arenaPrice, setArenaPrice] = useState<number>(1200);
@@ -164,18 +261,14 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const [editCity, setEditCity] = useState<string>(profile?.city || '');
   const [editBio, setEditBio] = useState<string>(profile?.bio || '');
   const [editBusiness, setEditBusiness] = useState<string>(profile?.businessName || '');
-  const [editUpiId, setEditUpiId] = useState<string>(profile?.paymentSettings?.upiId || '');
-  const [editBeneficiaryName, setEditBeneficiaryName] = useState<string>(
-    profile?.paymentSettings?.beneficiaryName || profile?.businessName || ''
-  );
-
-  // New Turf Payment ID state
-  const [turfUpiId, setTurfUpiId] = useState<string>('');
-  const [turfBeneficiary, setTurfBeneficiary] = useState<string>('');
 
   // Payment Settlement Dialog State
   const [settlementBooking, setSettlementBooking] = useState<Booking | null>(null);
   const [settlementAmount, setSettlementAmount] = useState<number>(0);
+
+  // Edit Arena Modal state
+  const [editingArena, setEditingArena] = useState<Arena | null>(null);
+  const [showEditArenaModal, setShowEditArenaModal] = useState<boolean>(false);
 
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
@@ -183,27 +276,29 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   };
 
   const loadData = async () => {
-    if (!user) return;
+    if (!user || !user.uid || typeof user.uid !== 'string' || !user.uid.trim()) return;
     setLoading(true);
     try {
       const ownerTurfs = await getOwnerTurfs(user.uid);
-      setTurfs(ownerTurfs);
+      setTurfs(ownerTurfs || []);
 
       const arenaMap: Record<string, Arena[]> = {};
-      for (const t of ownerTurfs) {
-        arenaMap[t.id] = await getTurfArenas(t.id);
+      for (const t of (ownerTurfs || [])) {
+        if (t && t.id) {
+          arenaMap[t.id] = await getTurfArenas(t.id);
+        }
       }
       setAllArenasMap(arenaMap);
 
-      if (ownerTurfs.length > 0) {
+      if (ownerTurfs && ownerTurfs.length > 0) {
         const activeT = selectedTurf && ownerTurfs.find((t) => t.id === selectedTurf.id)
           ? selectedTurf
           : ownerTurfs[0];
         setSelectedTurf(activeT);
 
-        const turfArenas = arenaMap[activeT.id] || (await getTurfArenas(activeT.id));
-        setArenas(turfArenas);
-        if (turfArenas.length > 0) {
+        const turfArenas = (activeT?.id && arenaMap[activeT.id]) || (activeT?.id ? await getTurfArenas(activeT.id) : []);
+        setArenas(turfArenas || []);
+        if (turfArenas && turfArenas.length > 0) {
           setSelectedArena(turfArenas[0]);
         } else {
           setSelectedArena(null);
@@ -215,10 +310,13 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
       }
 
       const allSlots = await getOwnerSlots(user.uid);
-      setSlots(allSlots);
+      setSlots(allSlots || []);
 
       const allBookings = await getOwnerBookings(user.uid);
-      setBookings(allBookings);
+      setBookings(allBookings || []);
+
+      const feats = await getEffectiveOwnerPlanFeatures(user.uid);
+      setPlanFeatures(feats);
     } catch (err: any) {
       console.error('Error loading owner data:', err);
       showToast('Error loading records from Firestore.', 'error');
@@ -230,6 +328,14 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   useEffect(() => {
     loadData();
   }, [user]);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    const unsub = listenOwnerBrandProfile(user.uid, (bp) => {
+      setBrandProfile(bp);
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
   const handleSelectTurf = async (turf: Turf) => {
     setSelectedTurf(turf);
@@ -268,8 +374,8 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const handleCreateTurf = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
-    if (!turfName.trim() || !turfAddress.trim()) {
-      showToast('Turf name and address are required.', 'error');
+    if (!turfName.trim() || !turfAddress.trim() || !turfCity.trim() || !turfLocationUrl.trim()) {
+      showToast('Turf name, address, city, and Google Maps Location Link are compulsory fields.', 'error');
       return;
     }
 
@@ -281,7 +387,8 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         description: turfDesc.trim(),
         address: turfAddress.trim(),
         area: turfArea.trim() || 'Central',
-        city: turfCity.trim() || 'Mumbai',
+        city: turfCity.trim(),
+        locationUrl: turfLocationUrl.trim(),
         phoneNumber: turfPhone.trim(),
         openingTime: turfOpenTime,
         closingTime: turfCloseTime,
@@ -291,37 +398,136 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         latitude: turfLat,
         longitude: turfLng,
         photos: turfPhotos,
+        allowPayAtVenue: turfAllowPayAtVenue,
+        allowPayLater: turfAllowPayAtVenue,
         active: true,
-        upiId: turfUpiId.trim() || profile?.paymentSettings?.upiId || undefined,
-        beneficiaryName:
-          turfBeneficiary.trim() ||
-          profile?.paymentSettings?.beneficiaryName ||
-          turfName.trim(),
       });
 
       // Automatically create a default arena for this turf
+      let initialArenaName = 'Main 7v7 Arena';
+      let initialSport = turfSports[0] || 'Football';
+      let initialDesc = 'Full sized high-grade astroturf sports arena with floodlights';
+      let initialCapacity = 14;
+
+      if (turfFacilityCategory === 'INDOOR_GAME') {
+        initialArenaName = `${turfIndoorGameType} Table #1`;
+        initialSport = turfIndoorGameType;
+        initialDesc = `Climate-controlled indoor gaming zone for ${turfIndoorGameType} with AC lounge and pro equipment`;
+        initialCapacity = 4;
+      }
+
       await createArena({
         turfId: newTurfId,
         ownerId: user.uid,
-        name: 'Main 7v7 Arena',
-        sport: turfSports[0] || 'Football',
-        description: 'Full sized high-grade astroturf sports arena with floodlights',
-        capacity: 14,
+        name: initialArenaName,
+        sport: initialSport,
+        sports: [initialSport],
+        facilityType: turfFacilityCategory,
+        indoorGameType: turfFacilityCategory === 'INDOOR_GAME' ? turfIndoorGameType : undefined,
+        description: initialDesc,
+        capacity: initialCapacity,
         pricePerSlot: turfBasePrice,
         photos: turfPhotos.slice(0, 1),
         active: true,
       });
 
-      showToast('Turf created with default Arena successfully!');
+      showToast(
+        turfFacilityCategory === 'INDOOR_GAME'
+          ? 'Dedicated Gaming Zone created with default Arena station!'
+          : 'Sports Turf created with default Arena court!'
+      );
       setShowAddTurfModal(false);
       // Reset form
       setTurfName('');
       setTurfDesc('');
       setTurfAddress('');
+      setTurfLocationUrl('');
       setTurfPhotos([]);
+      setTurfFacilityCategory('OUTDOOR_TURF');
       await loadData();
     } catch (err: any) {
       showToast(err.message || 'Failed to create turf.', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const openEditTurfModal = (turf: Turf) => {
+    setEditingTurf(turf);
+    setTurfName(turf.name || '');
+    setTurfDesc(turf.description || '');
+    setTurfAddress(turf.address || '');
+    setTurfArea(turf.area || '');
+    setTurfCity(turf.city || '');
+    setTurfLocationUrl(turf.locationUrl || '');
+    setTurfPhone(turf.phoneNumber || '');
+    setTurfOpenTime(turf.openingTime || '06:00');
+    setTurfCloseTime(turf.closingTime || '23:00');
+    setTurfBasePrice(turf.basePrice || 1200);
+    setTurfSports(turf.sports && turf.sports.length > 0 ? turf.sports : ['Football']);
+    setTurfFacilities(turf.facilities && turf.facilities.length > 0 ? turf.facilities : ['Floodlights']);
+    setTurfLat(turf.latitude || 19.076);
+    setTurfLng(turf.longitude || 72.8777);
+    setTurfPhotos(turf.photos || []);
+    setTurfAllowPayAtVenue(turf.allowPayAtVenue !== false && turf.allowPayLater !== false);
+    setShowEditTurfModal(true);
+  };
+
+  const handleToggleTurfPayAtVenueQuick = async (turf: Turf) => {
+    const currentAllowed = turf.allowPayAtVenue !== false && turf.allowPayLater !== false;
+    const nextAllowed = !currentAllowed;
+    try {
+      await updateTurf(turf.id, {
+        allowPayAtVenue: nextAllowed,
+        allowPayLater: nextAllowed,
+      });
+      showToast(
+        nextAllowed
+          ? `Pay at Venue turned ON for "${turf.name}". Players can pay cash at counter.`
+          : `Pay at Venue turned OFF for "${turf.name}". 100% online advance payment is now enforced.`
+      );
+      await loadData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update payment option.', 'error');
+    }
+  };
+
+  const handleUpdateTurf = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !editingTurf) return;
+    if (!turfName.trim() || !turfAddress.trim() || !turfCity.trim() || !turfLocationUrl.trim()) {
+      showToast('Turf name, address, city, and Google Maps Location Link are compulsory fields.', 'error');
+      return;
+    }
+
+    setActionLoading(true);
+    try {
+      await updateTurf(editingTurf.id, {
+        name: turfName.trim(),
+        description: turfDesc.trim(),
+        address: turfAddress.trim(),
+        area: turfArea.trim() || 'Central',
+        city: turfCity.trim(),
+        locationUrl: turfLocationUrl.trim(),
+        phoneNumber: turfPhone.trim(),
+        openingTime: turfOpenTime,
+        closingTime: turfCloseTime,
+        sports: turfSports,
+        facilities: turfFacilities,
+        basePrice: turfBasePrice,
+        latitude: turfLat,
+        longitude: turfLng,
+        photos: turfPhotos,
+        allowPayAtVenue: turfAllowPayAtVenue,
+        allowPayLater: turfAllowPayAtVenue,
+      });
+
+      showToast('Venue updated successfully!');
+      setShowEditTurfModal(false);
+      setEditingTurf(null);
+      await loadData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update venue.', 'error');
     } finally {
       setActionLoading(false);
     }
@@ -331,6 +537,10 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
   const handleCreateArena = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !selectedTurf) return;
+    if (planFeatures.multiCourtSetup === false && arenas.length >= 1) {
+      showToast('Multi-Court / Multi-Arena setup is locked on your current plan. Please upgrade to Pro to add multiple courts or arenas.', 'error');
+      return;
+    }
     if (!arenaName.trim()) {
       showToast('Arena name is required.', 'error');
       return;
@@ -338,22 +548,62 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
     setActionLoading(true);
     try {
-      await createArena({
-        turfId: selectedTurf.id,
-        ownerId: user.uid,
-        name: arenaName.trim(),
-        sport: arenaSport,
-        description: arenaDesc.trim(),
-        capacity: Number(arenaCapacity) || 12,
-        pricePerSlot: Number(arenaPrice) || selectedTurf.basePrice,
-        photos: arenaPhotos,
-        active: true,
-      });
+      if (arenaFacilityType === 'INDOOR_GAME') {
+        const gameName = arenaIndoorGame;
+        await createArena({
+          turfId: selectedTurf.id,
+          ownerId: user.uid,
+          name: arenaName.trim(),
+          sport: gameName,
+          sports: [gameName],
+          facilityType: 'INDOOR_GAME',
+          indoorGameType: gameName,
+          tableOrBoardNumber: arenaName.trim(),
+          equipmentIncluded: arenaEquipment,
+          hasAirConditioning: arenaHasAC,
+          hasLoungeAccess: arenaHasLounge,
+          description: arenaDesc.trim() || `${gameName} station at ${selectedTurf.name}`,
+          capacity: Number(arenaCapacity) || 4,
+          pricePerSlot: Number(arenaPrice) || 200,
+          photos: arenaPhotos.length > 0 ? arenaPhotos : (selectedTurf.photos?.slice(0, 1) || []),
+          active: true,
+        });
 
-      showToast('Arena added to turf successfully!');
+        // Ensure parent turf lists this indoor game & has gaming zone enabled
+        const updatedSports = Array.from(new Set([...(selectedTurf.sports || []), gameName]));
+        const updatedIndoorGames = Array.from(new Set([...(selectedTurf.indoorGames || []), gameName]));
+        await updateTurf(selectedTurf.id, {
+          hasGamingZone: true,
+          sports: updatedSports,
+          indoorGames: updatedIndoorGames,
+        });
+
+        showToast(`Indoor gaming station "${arenaName}" (${gameName}) added to Gaming Zone!`);
+      } else {
+        const finalSports = arenaSports.length > 0 ? arenaSports : [arenaSport || 'Football'];
+        await createArena({
+          turfId: selectedTurf.id,
+          ownerId: user.uid,
+          name: arenaName.trim(),
+          sport: finalSports[0],
+          sports: finalSports,
+          facilityType: 'OUTDOOR_TURF',
+          description: arenaDesc.trim() || `${finalSports.join(' & ')} arena at ${selectedTurf.name}`,
+          capacity: Number(arenaCapacity) || 12,
+          pricePerSlot: Number(arenaPrice) || selectedTurf.basePrice,
+          photos: arenaPhotos,
+          active: true,
+        });
+
+        showToast(`Outdoor pitch added! Sports: ${finalSports.join(', ')}`);
+      }
+
       setShowAddArenaModal(false);
       setArenaName('');
       setArenaDesc('');
+      setArenaSports(['Football']);
+      setArenaFacilityType('OUTDOOR_TURF');
+      setArenaIndoorGame('Pool');
       setArenaPhotos([]);
       await loadData();
     } catch (err: any) {
@@ -578,10 +828,101 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
   const nextSevenDays = getNextDays(7);
 
-  // Filter slots for current view
-  const currentArenaSlots = slots.filter(
-    (s) => (!selectedArena || s.arenaId === selectedArena.id) && s.date === selectedSlotDate
+  // Filter and sort slots chronologically for current view
+  const currentArenaSlots: Slot[] = sortSlotsChronologically<Slot>(
+    slots.filter(
+      (s) => (!selectedArena || s.arenaId === selectedArena.id) && s.date === selectedSlotDate
+    )
   );
+
+  // Helper: Live status calculation for bookings
+  const getBookingGameStatus = (b: Booking): 'LIVE' | 'OVER' | 'UPCOMING' => {
+    if (b.date < todayStr) return 'OVER';
+    if (b.date > todayStr) return 'UPCOMING';
+
+    const now = new Date();
+    const currentMins = now.getHours() * 60 + now.getMinutes();
+
+    const parseToMins = (timeStr: string) => {
+      if (!timeStr) return 0;
+      const isPM = timeStr.toUpperCase().includes('PM');
+      const isAM = timeStr.toUpperCase().includes('AM');
+      const clean = timeStr.replace(/[^0-9:]/g, '');
+      const parts = clean.split(':').map(Number);
+      let h = parts[0] || 0;
+      const m = parts[1] || 0;
+      if (isPM && h < 12) h += 12;
+      if (isAM && h === 12) h = 0;
+      return h * 60 + m;
+    };
+
+    const startMins = parseToMins(b.startTime);
+    const endMins = parseToMins(b.endTime);
+
+    if (currentMins >= startMins && currentMins <= endMins) return 'LIVE';
+    if (currentMins > endMins) return 'OVER';
+    return 'UPCOMING';
+  };
+
+  // Filter bookings for the Owner Bookings view
+  const filteredOwnerBookings = bookings.filter((b) => {
+    const isLobby = isLobbyBooking(b);
+    const term = bookingSearchTerm.trim().toLowerCase();
+
+    // Source Filter: ALL / INDIVIDUAL / LOBBY
+    if (bookingSourceFilter === 'INDIVIDUAL' && isLobby) return false;
+    if (bookingSourceFilter === 'LOBBY' && !isLobby) return false;
+
+    const matchesSearch =
+      !term ||
+      b.playerName.toLowerCase().includes(term) ||
+      b.playerEmail?.toLowerCase().includes(term) ||
+      b.playerPhone?.includes(term) ||
+      b.bookingId?.toLowerCase().includes(term) ||
+      b.turfName.toLowerCase().includes(term) ||
+      b.arenaName?.toLowerCase().includes(term) ||
+      b.sport?.toLowerCase().includes(term) ||
+      (term === 'lobby' && isLobby) ||
+      (term === 'individual' && !isLobby) ||
+      (term === 'private' && !isLobby);
+
+    if (!matchesSearch) return false;
+
+    // Date filtering
+    const dObj = new Date();
+    dObj.setDate(dObj.getDate() - 1);
+    const yestStr = dObj.toISOString().split('T')[0];
+    const tObj = new Date();
+    tObj.setDate(tObj.getDate() + 1);
+    const tomoStr = tObj.toISOString().split('T')[0];
+
+    if (bookingDateFilter === 'TODAY' && b.date !== todayStr) return false;
+    if (bookingDateFilter === 'YESTERDAY' && b.date !== yestStr) return false;
+    if (bookingDateFilter === 'TOMORROW' && b.date !== tomoStr) return false;
+    if (bookingDateFilter === 'PAST' && b.date >= todayStr) return false;
+    if (
+      bookingDateFilter !== 'ALL' &&
+      bookingDateFilter !== 'TODAY' &&
+      bookingDateFilter !== 'YESTERDAY' &&
+      bookingDateFilter !== 'TOMORROW' &&
+      bookingDateFilter !== 'PAST'
+    ) {
+      if (b.date !== bookingDateFilter) return false;
+    }
+
+    const gameStatus = getBookingGameStatus(b);
+    const isCancelled = b.bookingStatus === 'CANCELLED';
+    const isNoShow = b.isNoShow;
+    const hasPendingDue = (b.amountDue || 0) > 0;
+
+    if (bookingStatusFilter === 'PENDING') return hasPendingDue && !isCancelled;
+    if (bookingStatusFilter === 'LIVE') return gameStatus === 'LIVE' && !isCancelled;
+    if (bookingStatusFilter === 'OVER') return gameStatus === 'OVER' && !isCancelled;
+    if (bookingStatusFilter === 'NOSHOW') return isNoShow;
+    if (bookingStatusFilter === 'CANCELLED') return isCancelled;
+
+    return true;
+  });
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 pb-24 sm:pb-12">
@@ -603,8 +944,8 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         </div>
       )}
 
-      {/* Top Header */}
-      <header className="bg-slate-900/80 border-b border-slate-800 sticky top-0 z-30 backdrop-blur-md">
+      {/* Top Header - Hidden on mobile (< md), replaced by sleek bottom nav bar with location selector */}
+      <header className="hidden md:block bg-slate-900/80 border-b border-slate-800 sticky top-0 z-30 backdrop-blur-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-8 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center font-black text-xl italic text-white shadow-lg shadow-indigo-600/30">
@@ -612,7 +953,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
             </div>
             <div>
               <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white flex items-center">
-                TRUFIT <span className="text-indigo-500 font-medium text-xs sm:text-sm ml-1.5 tracking-widest uppercase">Owner</span>
+                TURFIT <span className="text-indigo-500 font-medium text-xs sm:text-sm ml-1.5 tracking-widest uppercase">Owner</span>
               </h1>
             </div>
           </div>
@@ -627,6 +968,21 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Direct Messages Inbox Button */}
+              <button
+                id="owner-direct-messages-inbox-btn"
+                onClick={() => setShowDirectMessagesInboxModal(true)}
+                title="1-on-1 Direct Messages & Athlete Inquiries"
+                className="relative p-2 rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
+              >
+                <MessageSquare className="w-4 h-4 text-emerald-400" />
+                {unreadDirectMessagesCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-emerald-500 text-slate-950 text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center animate-pulse shadow-md">
+                    {unreadDirectMessagesCount > 9 ? '9+' : unreadDirectMessagesCount}
+                  </span>
+                )}
+              </button>
+
               <button
                 onClick={loadData}
                 title="Refresh Firestore data"
@@ -654,6 +1010,8 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         {/* TAB: DASHBOARD */}
         {currentTab === 'dashboard' && (
           <div className="space-y-6">
+            <PromotionalBannerCarousel audience="OWNERS" onNavigate={(screen) => setCurrentTab(screen as any)} />
+
             {/* Real Stats Metric Cards Grid - Sleek Interface */}
             <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl shadow-xl">
@@ -801,9 +1159,9 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                           </div>
                         ) : (
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {arenas.map((ar) => (
+                            {arenas.map((ar, arIdx) => (
                               <div
-                                key={ar.id}
+                                key={ar.id ? `owner-arena-${ar.id}` : `owner-arena-idx-${arIdx}`}
                                 onClick={() => setSelectedArena(ar)}
                                 className={`p-4 rounded-xl bg-slate-800 border transition-all cursor-pointer ${
                                   selectedArena?.id === ar.id
@@ -813,14 +1171,28 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                               >
                                 <div className="flex justify-between items-start mb-2">
                                   <h4 className="font-bold text-slate-100 text-sm">{ar.name}</h4>
-                                  <span className="bg-emerald-500/10 text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
-                                    Active
-                                  </span>
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setEditingArena(ar);
+                                        setShowEditArenaModal(true);
+                                      }}
+                                      className="px-2 py-0.5 text-[10px] font-bold bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600 hover:text-white border border-indigo-500/30 rounded transition-all cursor-pointer flex items-center gap-1"
+                                    >
+                                      <Pencil className="w-2.5 h-2.5" />
+                                      <span>Edit Pitch</span>
+                                    </button>
+                                    <span className="bg-emerald-500/10 text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                                      Active
+                                    </span>
+                                  </div>
                                 </div>
                                 <p className="text-xs text-slate-400">{ar.description || `${ar.sport} court`}</p>
                                 <div className="mt-3 flex items-center gap-3">
                                   <span className="text-[10px] text-indigo-300 bg-indigo-500/10 px-2 py-1 rounded font-semibold">
-                                    {formatCurrency(ar.pricePerSlot)}/hr
+                                    Pitch Price: {formatCurrency(ar.pricePerSlot)}
                                   </span>
                                   <span className="text-[10px] text-slate-400">
                                     Cap: {ar.capacity}
@@ -855,9 +1227,9 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                       </div>
                     ) : (
                       <div className="space-y-2.5">
-                        {todayBookings.map((b) => (
+                        {todayBookings.map((b, bIdx) => (
                           <div
-                            key={b.id}
+                            key={b.id ? `today-bk-${b.id}` : `today-bk-idx-${bIdx}`}
                             className="bg-slate-950 border border-slate-800/80 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                           >
                             <div className="flex items-center gap-3">
@@ -915,9 +1287,9 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                       My Turfs ({turfs.length})
                     </span>
                     <div className="space-y-2">
-                      {turfs.map((t) => (
+                      {turfs.map((t, tIdx) => (
                         <div
-                          key={t.id}
+                          key={t.id ? `quick-turf-${t.id}` : `quick-turf-idx-${tIdx}`}
                           onClick={() => handleSelectTurf(t)}
                           className={`p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
                             selectedTurf?.id === t.id
@@ -939,16 +1311,24 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
                   {/* Turf Location preview */}
                   {selectedTurf && (
-                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block mb-2">
+                    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-2">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block">
                         Turf Geolocation
                       </span>
-                      <InteractiveTurfMap
-                        userLocation={{ latitude: selectedTurf.latitude, longitude: selectedTurf.longitude }}
-                        turfs={[selectedTurf]}
-                        selectedTurfId={selectedTurf.id}
-                        onSelectTurf={() => {}}
-                      />
+                      <div className="bg-slate-950 rounded-xl p-3 border border-slate-800 text-xs space-y-1.5 font-mono">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Latitude:</span>
+                          <span className="text-white">{selectedTurf.latitude != null ? Number(selectedTurf.latitude).toFixed(6) : 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Longitude:</span>
+                          <span className="text-white">{selectedTurf.longitude != null ? Number(selectedTurf.longitude).toFixed(6) : 'N/A'}</span>
+                        </div>
+                        <div className="flex justify-between border-t border-slate-800/80 pt-1.5">
+                          <span className="text-slate-500">Address:</span>
+                          <span className="text-indigo-400 font-sans">{selectedTurf.area}, {selectedTurf.city}</span>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -968,11 +1348,28 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
               <div className="flex items-center gap-2">
                 <button
                   id="tab-add-turf-btn"
-                  onClick={() => setShowAddTurfModal(true)}
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-4 py-2.5 rounded-lg flex items-center gap-1.5 transition-all shadow-lg shadow-indigo-950/50 cursor-pointer"
+                  onClick={() => {
+                    setTurfFacilityCategory('OUTDOOR_TURF');
+                    setShowAddTurfModal(true);
+                  }}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl flex items-center gap-1.5 transition-all shadow-lg shadow-emerald-950/50 cursor-pointer"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Add New Turf</span>
+                  <span>+ Outdoor Turf</span>
+                </button>
+                <button
+                  id="tab-add-gamingzone-btn"
+                  onClick={() => {
+                    setTurfFacilityCategory('INDOOR_GAME');
+                    setTurfSports(['Pool', 'Snooker', 'Table Tennis', 'Carrom', 'PS5', 'Foosball']);
+                    setTurfFacilities(['Air Conditioning', 'AC Player Lounge', 'Refreshment Cafe', 'Sanitized Equipment']);
+                    setTurfBasePrice(250);
+                    setShowAddTurfModal(true);
+                  }}
+                  className="bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl flex items-center gap-1.5 transition-all shadow-lg shadow-amber-950/50 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Gaming Zone</span>
                 </button>
               </div>
             </div>
@@ -990,9 +1387,9 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
               </div>
             ) : (
               <div className="space-y-6">
-                {turfs.map((turf) => (
+                {turfs.map((turf, turfIdx) => (
                   <div
-                    key={turf.id}
+                    key={turf.id ? `turf-card-${turf.id}` : `turf-card-idx-${turfIdx}`}
                     className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4"
                   >
                     <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
@@ -1011,9 +1408,50 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                               <CheckCircle2 className="w-3 h-3" /> Open & Active
                             </span>
                           )}
+
+                          {turf.allowPayAtVenue !== false && turf.allowPayLater !== false ? (
+                            <span className="bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 text-[11px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                              <Banknote className="w-3 h-3 text-emerald-400" /> Pay at Venue ON
+                            </span>
+                          ) : (
+                            <span className="bg-amber-950/80 text-amber-300 border border-amber-500/40 text-[11px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                              <Banknote className="w-3 h-3 text-amber-400" /> 100% Online Advance
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-slate-400 mt-1">{turf.address}, {turf.area}</p>
-                        <p className="text-xs text-slate-500 mt-0.5">Hours: {turf.openingTime} - {turf.closingTime} • Phone: {turf.phoneNumber}</p>
+                        <div className="flex flex-wrap items-center gap-3 mt-1 text-xs text-slate-500">
+                          <span>Hours: {turf.openingTime} - {turf.closingTime}</span>
+                          <span>•</span>
+                          <span>Phone: {turf.phoneNumber}</span>
+                          {turf.locationUrl && (
+                            <>
+                              <span>•</span>
+                              <a
+                                href={turf.locationUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-indigo-400 hover:text-indigo-300 hover:underline font-medium"
+                              >
+                                <MapPin className="w-3.5 h-3.5 text-indigo-400" />
+                                <span>Google Maps Link</span>
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                            </>
+                          )}
+                        </div>
+                        {turf.photos && turf.photos.length > 0 && (
+                          <div className="flex items-center gap-2 mt-2.5 overflow-x-auto">
+                            {turf.photos.map((p, pIdx) => (
+                              <img
+                                key={`turf-${turf.id}-top-photo-${pIdx}`}
+                                src={p}
+                                alt={`${turf.name} photo ${pIdx + 1}`}
+                                className="w-14 h-10 object-cover rounded-md border border-slate-700/60 shadow-sm"
+                              />
+                            ))}
+                          </div>
+                        )}
                         {turf.isClosed && turf.closedReason && (
                           <p className="text-xs text-rose-400 font-medium mt-1">
                             Closure Note: {turf.closedReason}
@@ -1022,6 +1460,17 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                       </div>
 
                       <div className="flex items-center flex-wrap gap-2">
+                        {/* Edit Turf Button */}
+                        <button
+                          type="button"
+                          onClick={() => openEditTurfModal(turf)}
+                          className="bg-amber-500/20 text-amber-300 hover:bg-amber-600 hover:text-white border border-amber-500/40 text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
+                          title="Edit Venue Details, Location & Photos"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          <span>Edit Venue</span>
+                        </button>
+
                         {/* Turf Closed / Open Toggle */}
                         <button
                           type="button"
@@ -1036,6 +1485,29 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                           <span>{turf.isClosed ? 'Reopen Turf' : 'Close Turf'}</span>
                         </button>
 
+                        {/* Pay at Venue Quick Toggle */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleTurfPayAtVenueQuick(turf)}
+                          className={`text-xs font-bold px-3 py-2 rounded-lg border flex items-center gap-1.5 transition-all cursor-pointer ${
+                            turf.allowPayAtVenue !== false && turf.allowPayLater !== false
+                              ? 'bg-emerald-950/40 text-emerald-300 hover:bg-emerald-600 hover:text-white border-emerald-500/40'
+                              : 'bg-amber-950/40 text-amber-300 hover:bg-amber-600 hover:text-white border-amber-500/40'
+                          }`}
+                          title={
+                            turf.allowPayAtVenue !== false && turf.allowPayLater !== false
+                              ? 'Pay at Venue is active: Click to turn OFF and require 100% online advance'
+                              : 'Online only: Click to turn ON and permit cash at counter'
+                          }
+                        >
+                          <Banknote className="w-3.5 h-3.5" />
+                          <span>
+                            {turf.allowPayAtVenue !== false && turf.allowPayLater !== false
+                              ? 'Pay at Venue: ON'
+                              : 'Pay at Venue: OFF'}
+                          </span>
+                        </button>
+
                         <button
                           onClick={() => {
                             setSelectedTurf(turf);
@@ -1047,14 +1519,28 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                         </button>
                         <button
                           onClick={async () => {
-                            if (confirm(`Delete turf "${turf.name}" and all associated arenas?`)) {
+                            try {
+                              // 1. Check for upcoming active bookings
+                              const { activeCount } = await checkTurfActiveBookings(turf.id);
+                              if (activeCount > 0) {
+                                alert(`Cannot delete venue "${turf.name}". It has ${activeCount} upcoming active booking(s). Please cancel or fulfill them first.`);
+                                return;
+                              }
+                              // 2. Explicit confirmation prompt
+                              const confirmed = window.confirm(
+                                `Are you sure you want to permanently delete "${turf.name}"?\n\nThis will remove all associated arenas, slots, and photos. This action cannot be undone.`
+                              );
+                              if (!confirmed) return;
+
                               await deleteTurf(turf.id);
-                              showToast('Turf deleted.');
+                              showToast(`Venue "${turf.name}" deleted successfully.`);
                               await loadData();
+                            } catch (err: any) {
+                              showToast(err.message || 'Failed to delete turf.', 'error');
                             }
                           }}
                           className="p-2 text-rose-400 hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer"
-                          title="Delete Turf"
+                          title="Delete Venue"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -1082,9 +1568,9 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                         <p className="text-xs text-slate-500 italic py-1">No arenas created yet. Click "+ Add Arena" above.</p>
                       ) : (
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-                          {(allArenasMap[turf.id] || []).map((arena) => (
+                          {(allArenasMap[turf.id] || []).map((arena, aIdx) => (
                             <div
-                              key={arena.id}
+                              key={arena.id ? `turf-arena-${arena.id}` : `turf-${turf.id || turfIdx}-arena-${aIdx}`}
                               className={`p-3 rounded-xl border flex items-center justify-between transition-all ${
                                 arena.isUnderMaintenance
                                   ? 'bg-amber-950/30 border-amber-500/40 text-amber-200'
@@ -1095,7 +1581,9 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                                 <div className="flex items-center gap-1.5">
                                   <span className="text-xs font-bold text-white">{arena.name}</span>
                                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                                    {arena.sport}
+                                    {arena.sports && arena.sports.length > 1
+                                      ? `⚡ Multi-Sport: ${arena.sports.join(' • ')}`
+                                      : arena.sport}
                                   </span>
                                 </div>
                                 <p className="text-[11px] text-slate-400 mt-0.5">
@@ -1109,6 +1597,18 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                               </div>
 
                               <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingArena(arena);
+                                    setShowEditArenaModal(true);
+                                  }}
+                                  className="text-[11px] font-bold px-2.5 py-1.5 rounded-lg border bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600 hover:text-white border-indigo-500/30 flex items-center gap-1 transition-all cursor-pointer"
+                                  title="Edit Pitch Details, Price, Photos & Amenities"
+                                >
+                                  <Pencil className="w-3 h-3" />
+                                  <span>Edit Pitch</span>
+                                </button>
                                 <button
                                   type="button"
                                   onClick={() => handleToggleArenaMaintenance(arena)}
@@ -1126,6 +1626,32 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                                   <Wrench className="w-3 h-3" />
                                   <span>{arena.isUnderMaintenance ? 'In Maintenance' : 'Set Maint.'}</span>
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      const { activeCount } = await checkArenaActiveBookings(arena.id);
+                                      if (activeCount > 0) {
+                                        alert(`Cannot delete pitch "${arena.name}". It has ${activeCount} upcoming active booking(s). Please cancel or fulfill them first.`);
+                                        return;
+                                      }
+                                      const confirmed = window.confirm(
+                                        `Are you sure you want to delete pitch "${arena.name}"? Future unbooked slots for this pitch will be removed.`
+                                      );
+                                      if (!confirmed) return;
+
+                                      await deleteArena(arena.id);
+                                      showToast(`Pitch "${arena.name}" deleted.`);
+                                      await loadData();
+                                    } catch (err: any) {
+                                      showToast(err.message || 'Failed to delete pitch.', 'error');
+                                    }
+                                  }}
+                                  className="p-1.5 text-rose-400 hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer"
+                                  title="Delete Pitch"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             </div>
                           ))}
@@ -1138,7 +1664,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                       <div className="flex gap-2 overflow-x-auto py-2">
                         {turf.photos.map((p, idx) => (
                           <img
-                            key={idx}
+                            key={`turf-${turf.id}-bottom-photo-${idx}`}
                             src={p}
                             alt="Turf"
                             className="w-24 h-20 object-cover rounded-xl border border-slate-700 flex-shrink-0"
@@ -1150,12 +1676,12 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                     {/* Sports & Facilities tags */}
                     <div className="flex flex-wrap gap-2 text-xs">
                       {turf.sports?.map((s, i) => (
-                        <span key={i} className="bg-slate-800 text-slate-300 px-2.5 py-1 rounded-lg border border-slate-700">
+                        <span key={`turf-${turf.id}-sport-${s}-${i}`} className="bg-slate-800 text-slate-300 px-2.5 py-1 rounded-lg border border-slate-700">
                           ⚽ {s}
                         </span>
                       ))}
                       {turf.facilities?.map((f, i) => (
-                        <span key={i} className="bg-slate-950 text-slate-400 px-2.5 py-1 rounded-lg border border-slate-800">
+                        <span key={`turf-${turf.id}-fac-${f}-${i}`} className="bg-slate-950 text-slate-400 px-2.5 py-1 rounded-lg border border-slate-800">
                           ✓ {f}
                         </span>
                       ))}
@@ -1183,19 +1709,39 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     id="open-7day-slot-btn"
-                    onClick={() => setShowSevenDayModal(true)}
-                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-indigo-950/50 cursor-pointer"
+                    onClick={() => {
+                      if (planFeatures.autoSlotGenerator === false) {
+                        showToast('Auto Slot Generator is locked on your current subscription plan. Upgrade your plan to unlock automated slot generation.', 'error');
+                        return;
+                      }
+                      setShowSevenDayModal(true);
+                    }}
+                    className={`text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md cursor-pointer ${
+                      planFeatures.autoSlotGenerator !== false
+                        ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-950/50'
+                        : 'bg-slate-800 text-slate-500 border border-slate-700'
+                    }`}
                   >
-                    <Zap className="w-3.5 h-3.5" />
+                    {planFeatures.autoSlotGenerator !== false ? <Zap className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5 text-amber-400" />}
                     <span>7-Day Generator</span>
                   </button>
 
                   <button
                     id="open-recurring-slot-btn"
-                    onClick={() => setShowRecurringSlotsModal(true)}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md shadow-emerald-950/50 cursor-pointer"
+                    onClick={() => {
+                      if (planFeatures.autoSlotGenerator === false) {
+                        showToast('Recurring Slots Generator is locked on your current subscription plan. Upgrade your plan to unlock automated slot generation.', 'error');
+                        return;
+                      }
+                      setShowRecurringSlotsModal(true);
+                    }}
+                    className={`text-xs font-bold px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition-all shadow-md cursor-pointer ${
+                      planFeatures.autoSlotGenerator !== false
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/50'
+                        : 'bg-slate-800 text-slate-500 border border-slate-700'
+                    }`}
                   >
-                    <Repeat className="w-3.5 h-3.5" />
+                    {planFeatures.autoSlotGenerator !== false ? <Repeat className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5 text-amber-400" />}
                     <span>Recurring Slots</span>
                   </button>
 
@@ -1231,8 +1777,8 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                     }}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                   >
-                    {turfs.map((t) => (
-                      <option key={t.id} value={t.id}>
+                    {turfs.map((t, tIdx) => (
+                      <option key={t.id ? `slot-turf-${t.id}` : `slot-turf-idx-${tIdx}`} value={t.id}>
                         {t.name} ({t.city}) {t.isClosed ? '🔴 [CLOSED]' : ''}
                       </option>
                     ))}
@@ -1265,8 +1811,8 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                     }}
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                   >
-                    {arenas.map((a) => (
-                      <option key={a.id} value={a.id}>
+                    {arenas.map((a, aIdx) => (
+                      <option key={a.id ? `slot-arena-${a.id}` : `slot-arena-idx-${aIdx}`} value={a.id}>
                         {a.name} ({a.sport}) {a.isUnderMaintenance ? '🔧 [MAINTENANCE]' : ''}
                       </option>
                     ))}
@@ -1281,7 +1827,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                 Select Date ({getDayName(selectedSlotDate)})
               </span>
               <div className="flex gap-2 overflow-x-auto pb-2">
-                {nextSevenDays.map((d) => {
+                {nextSevenDays.map((d, dIdx) => {
                   const isSelected = d.dateStr === selectedSlotDate;
                   const daySlotsCount = slots.filter(
                     (s) => (!selectedArena || s.arenaId === selectedArena.id) && s.date === d.dateStr
@@ -1289,7 +1835,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
                   return (
                     <button
-                      key={d.dateStr}
+                      key={d.dateStr || `day-tab-${dIdx}`}
                       onClick={() => setSelectedSlotDate(d.dateStr)}
                       className={`min-w-[80px] p-3 rounded-xl border text-center transition-all cursor-pointer flex flex-col items-center gap-1 ${
                         isSelected
@@ -1329,7 +1875,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                 </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-                  {currentArenaSlots.map((slot) => {
+                  {currentArenaSlots.map((slot, sIdx) => {
                     const isAvailable = slot.status === 'AVAILABLE';
                     const isBookedPlayer = slot.status === 'BOOKED_BY_PLAYER';
                     const isBookedOwner = slot.status === 'BOOKED_BY_OWNER';
@@ -1337,7 +1883,7 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
                     return (
                       <div
-                        key={slot.id}
+                        key={slot.id ? `owner-slot-${slot.id}` : `owner-slot-idx-${sIdx}`}
                         className={`p-4 rounded-xl border transition-all relative ${
                           isAvailable
                             ? 'bg-slate-900 border-2 border-indigo-500/50 shadow-lg shadow-indigo-950/20'
@@ -1454,86 +2000,872 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         {/* TAB: BOOKINGS */}
         {currentTab === 'bookings' && (
           <div className="space-y-6">
-            <div>
-              <h2 className="text-xl font-bold text-white">All Bookings & Reservations</h2>
-              <p className="text-xs text-slate-400">Real-time player bookings across your turfs</p>
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-indigo-400" />
+                  All Bookings & Slot Reservations
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Filter by date, track live matches, view player rosters and collect split dues
+                </p>
+              </div>
+
+              {/* Search Bar */}
+              <div className="relative w-full md:w-72">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={bookingSearchTerm}
+                  onChange={(e) => setBookingSearchTerm(e.target.value)}
+                  placeholder="Search player, phone, ID..."
+                  className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
             </div>
 
-            {bookings.length === 0 ? (
+            {/* Date & Quick Filters Bar */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold text-slate-400 flex items-center gap-1.5 mr-1">
+                    <Filter className="w-3.5 h-3.5 text-indigo-400" /> Filter Date:
+                  </span>
+                  {[
+                    { key: 'ALL', label: 'All Dates' },
+                    { key: 'TODAY', label: 'Today' },
+                    { key: 'YESTERDAY', label: 'Yesterday' },
+                    { key: 'TOMORROW', label: 'Tomorrow' },
+                    { key: 'PAST', label: 'Past Bookings' },
+                  ].map((df) => (
+                    <button
+                      key={df.key}
+                      onClick={() => setBookingDateFilter(df.key)}
+                      className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                        bookingDateFilter === df.key
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                      }`}
+                    >
+                      {df.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Custom Date Input */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">Custom Date:</span>
+                  <input
+                    type="date"
+                    value={
+                      bookingDateFilter !== 'ALL' &&
+                      bookingDateFilter !== 'TODAY' &&
+                      bookingDateFilter !== 'YESTERDAY' &&
+                      bookingDateFilter !== 'TOMORROW' &&
+                      bookingDateFilter !== 'PAST'
+                        ? bookingDateFilter
+                        : ''
+                    }
+                    onChange={(e) => setBookingDateFilter(e.target.value || 'ALL')}
+                    className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  />
+                  {bookingDateFilter !== 'ALL' && (
+                    <button
+                      onClick={() => setBookingDateFilter('ALL')}
+                      className="text-xs text-slate-400 hover:text-white underline cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Status Filter Pills with Badges */}
+              <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-800/80">
+                {[
+                  { key: 'ALL', label: 'All Bookings', count: bookings.length },
+                  {
+                    key: 'PENDING',
+                    label: 'Pending Dues',
+                    count: bookings.filter((b) => (b.amountDue || 0) > 0 && b.bookingStatus !== 'CANCELLED').length,
+                    color: 'text-amber-400',
+                  },
+                  {
+                    key: 'LIVE',
+                    label: 'Live Matches',
+                    count: bookings.filter((b) => getBookingGameStatus(b) === 'LIVE' && b.bookingStatus !== 'CANCELLED').length,
+                    color: 'text-emerald-400',
+                  },
+                  {
+                    key: 'OVER',
+                    label: 'Game Over',
+                    count: bookings.filter((b) => getBookingGameStatus(b) === 'OVER' && b.bookingStatus !== 'CANCELLED').length,
+                    color: 'text-rose-400',
+                  },
+                  {
+                    key: 'NOSHOW',
+                    label: 'No-Shows',
+                    count: bookings.filter((b) => b.isNoShow).length,
+                    color: 'text-purple-400',
+                  },
+                  {
+                    key: 'CANCELLED',
+                    label: 'Cancelled',
+                    count: bookings.filter((b) => b.bookingStatus === 'CANCELLED').length,
+                    color: 'text-rose-400',
+                  },
+                ].map((st) => (
+                  <button
+                    key={st.key}
+                    onClick={() => setBookingStatusFilter(st.key as any)}
+                    className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
+                      bookingStatusFilter === st.key
+                        ? 'bg-indigo-600/30 border-indigo-500 text-white shadow-sm'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                  >
+                    <span>{st.label}</span>
+                    <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black ${
+                      bookingStatusFilter === st.key ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300'
+                    }`}>
+                      {st.count}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Booking Source Filter Pills (Individual vs Lobby Hosted Match) */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-800/80">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold text-slate-400 flex items-center gap-1.5 mr-1">
+                    <Tag className="w-3.5 h-3.5 text-indigo-400" /> Booking Type:
+                  </span>
+                  {[
+                    { key: 'ALL', label: 'All Match Types', count: bookings.length },
+                    {
+                      key: 'INDIVIDUAL',
+                      label: '👤 Individual Bookings',
+                      count: bookings.filter((b) => !isLobbyBooking(b)).length,
+                      activeColor: 'bg-sky-600/40 border-sky-500 text-sky-200',
+                      badgeColor: 'bg-sky-500 text-slate-950',
+                    },
+                    {
+                      key: 'LOBBY',
+                      label: '🏆 Lobby-Hosted Matches',
+                      count: bookings.filter((b) => isLobbyBooking(b)).length,
+                      activeColor: 'bg-purple-600/40 border-purple-500 text-purple-200',
+                      badgeColor: 'bg-purple-500 text-slate-950',
+                    },
+                  ].map((sf) => (
+                    <button
+                      key={sf.key}
+                      onClick={() => setBookingSourceFilter(sf.key as any)}
+                      className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
+                        bookingSourceFilter === sf.key
+                          ? (sf.activeColor || 'bg-indigo-600/30 border-indigo-500 text-white shadow-sm')
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                      }`}
+                    >
+                      <span>{sf.label}</span>
+                      <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black ${
+                        bookingSourceFilter === sf.key
+                          ? (sf.badgeColor || 'bg-indigo-500 text-white')
+                          : 'bg-slate-800 text-slate-300'
+                      }`}>
+                        {sf.count}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {filteredOwnerBookings.length === 0 ? (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center text-slate-400 text-sm">
-                No bookings recorded yet.
+                No bookings match your selected date or status filter.
               </div>
             ) : (
-              <div className="space-y-3">
-                {bookings.map((b) => (
-                  <div
-                    key={b.id}
-                    className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs text-indigo-400 font-bold bg-indigo-950/60 px-2.5 py-0.5 rounded-md border border-indigo-500/30">
-                          {b.bookingId || 'TF-BOOKING'}
-                        </span>
-                        <span className="text-base font-bold text-white">{b.playerName}</span>
-                        <span className="text-xs text-slate-400">({b.playerEmail})</span>
-                      </div>
+              <div className="space-y-4">
+                {filteredOwnerBookings.map((b, bIdx) => {
+                  const gameStatus = getBookingGameStatus(b);
+                  const isCancelled = b.bookingStatus === 'CANCELLED';
+                  const isNoShow = b.isNoShow;
+                  const isLive = gameStatus === 'LIVE' && !isCancelled;
+                  const isOver = gameStatus === 'OVER' && !isCancelled;
+                  const hasDue = (b.amountDue || 0) > 0;
+                  const isExpanded = expandedBookingRosterId === b.id;
+                  const isLobby = isLobbyBooking(b);
 
-                      <div className="text-xs text-slate-300 flex flex-wrap items-center gap-2 mt-1">
-                        <span className="text-white font-medium">{b.turfName}</span>
-                        <span>•</span>
-                        <span>{b.arenaName} ({b.sport})</span>
-                        <span>•</span>
-                        <span className="text-indigo-400 font-bold">{formatDateString(b.date)}</span>
-                        <span>•</span>
-                        <span>{b.startTime} - {b.endTime}</span>
-                      </div>
-                    </div>
+                  // Dynamic Card Border & Background styling strictly following prompt instructions:
+                  // 1. Canceled -> dark box with red cross (no text)
+                  // 2. Live -> Green
+                  // 3. Game Over + Pending Due -> Yellow
+                  // 4. Game Over + Settled -> Red
+                  let cardStyle = 'bg-slate-900 border-slate-800';
+                  if (isCancelled) {
+                    cardStyle = 'bg-slate-950/70 border-rose-900/40 opacity-80';
+                  } else if (isLive) {
+                    cardStyle = 'bg-emerald-950/20 border-emerald-500/80 shadow-lg shadow-emerald-950/30';
+                  } else if (isOver && hasDue) {
+                    cardStyle = 'bg-amber-950/20 border-amber-500/80 shadow-lg shadow-amber-950/30';
+                  } else if (isOver && !hasDue) {
+                    cardStyle = 'bg-rose-950/20 border-rose-500/70 shadow-lg shadow-rose-950/30';
+                  }
 
-                    <div className="flex items-center justify-between md:justify-end gap-4 pt-3 md:pt-0 border-t md:border-t-0 border-slate-800">
-                      <div className="text-right">
-                        <span className="text-base font-bold text-white block">
-                          {formatCurrency(b.totalAmount)}
-                        </span>
-                        <div className="text-xs text-slate-400 flex items-center gap-1.5 justify-end">
-                          <span>Paid: {formatCurrency(b.amountPaid)}</span>
-                          {b.amountDue > 0 && (
-                            <span className="text-rose-400 font-bold">Due: {formatCurrency(b.amountDue)}</span>
+                  // Synthesize player roster from booking for split / individual ledger
+                  const totalPlayersCount = b.numberOfPlayers || (b.splitWith && b.splitWith.length > 0 ? b.splitWith.length + 1 : 1);
+                  const hostShare = b.playerShareAmount || Math.round(b.totalAmount / totalPlayersCount);
+                  const hostPaid = Math.min(b.amountPaid, hostShare);
+                  const hostDue = Math.max(0, hostShare - hostPaid);
+
+                  return (
+                    <div
+                      key={b.id ? `owner-bk-${b.id}` : `owner-bk-idx-${bIdx}`}
+                      className={`border rounded-2xl p-5 shadow-xl transition-all ${cardStyle}`}
+                    >
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        {/* Left: Info */}
+                        <div className="space-y-1.5 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-xs text-indigo-400 font-bold bg-indigo-950/80 px-2.5 py-0.5 rounded-md border border-indigo-500/30">
+                              {b.bookingId || 'TF-BOOKING'}
+                            </span>
+
+                            {/* Booking Type Badge */}
+                            {isLobby ? (
+                              <span className="inline-flex items-center gap-1.5 bg-purple-500/20 text-purple-300 border border-purple-500/40 text-[11px] font-bold px-2.5 py-0.5 rounded-md shadow-sm">
+                                <Trophy className="w-3.5 h-3.5 text-purple-400" />
+                                Lobby Match {b.playerName ? `(Host: ${b.playerName})` : ''}
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 bg-sky-500/20 text-sky-300 border border-sky-500/40 text-[11px] font-bold px-2.5 py-0.5 rounded-md shadow-sm">
+                                <User className="w-3.5 h-3.5 text-sky-400" />
+                                {b.bookingType === 'OWNER' ? 'Venue Walk-in / Desk' : 'Individual Booking'}
+                              </span>
+                            )}
+
+                            <span className="text-base font-bold text-white">{b.playerName}</span>
+                            {b.playerPhone && (
+                              <span className="text-xs text-slate-400 font-mono">📱 {b.playerPhone}</span>
+                            )}
+                            <span className="text-xs text-slate-500">({b.playerEmail})</span>
+                          </div>
+
+                          <div className="text-xs text-slate-300 flex flex-wrap items-center gap-2">
+                            <span className="text-white font-medium">{b.turfName}</span>
+                            <span>•</span>
+                            <span className="text-slate-300">{b.arenaName} ({b.sport})</span>
+                            <span>•</span>
+                            <span className="text-indigo-400 font-bold flex items-center gap-1">
+                              <Calendar className="w-3 h-3 inline" />
+                              {formatDateString(b.date)} ({b.day})
+                            </span>
+                            <span>•</span>
+                            <span className="font-medium text-slate-200 flex items-center gap-1">
+                              <Clock className="w-3 h-3 inline" />
+                              {b.startTime} - {b.endTime}
+                            </span>
+                          </div>
+
+                          {/* Quick Badges Row */}
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            {isLive && (
+                              <span className="inline-flex items-center gap-1.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[11px] font-black px-2.5 py-0.5 rounded-md animate-pulse">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                                LIVE MATCH IN PROGRESS
+                              </span>
+                            )}
+
+                            {isOver && hasDue && (
+                              <span className="inline-flex items-center gap-1 bg-amber-500/20 text-amber-400 border border-amber-500/40 text-[11px] font-bold px-2.5 py-0.5 rounded-md">
+                                <AlertCircle className="w-3 h-3" />
+                                GAME OVER • ₹{b.amountDue} PENDING DUE
+                              </span>
+                            )}
+
+                            {isOver && !hasDue && (
+                              <span className="inline-flex items-center gap-1 bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[11px] font-bold px-2.5 py-0.5 rounded-md">
+                                GAME OVER • ALL SETTLED
+                              </span>
+                            )}
+
+                            {!isOver && !isLive && !isCancelled && (
+                              <span className="bg-slate-800 text-slate-300 border border-slate-700 text-[11px] font-bold px-2.5 py-0.5 rounded-md">
+                                UPCOMING
+                              </span>
+                            )}
+
+                            {isNoShow && (
+                              <span className="bg-purple-500/20 text-purple-400 border border-purple-500/30 text-[11px] font-bold px-2.5 py-0.5 rounded-md">
+                                NO-SHOW
+                              </span>
+                            )}
+
+                            <span className="bg-slate-800/80 text-slate-400 text-[11px] px-2 py-0.5 rounded-md border border-slate-700/50">
+                              👥 {totalPlayersCount} Players in Slot
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Right: Status Indicator / Amount & Actions */}
+                        <div className="flex items-center justify-between md:justify-end gap-4 pt-3 md:pt-0 border-t md:border-t-0 border-slate-800">
+                          <div className="text-right">
+                            <span className="text-base font-bold text-white block">
+                              {formatCurrency(b.totalAmount)}
+                            </span>
+                            <div className="text-xs text-slate-400 flex items-center gap-1.5 justify-end">
+                              <span>Paid: {formatCurrency(b.amountPaid)}</span>
+                              {b.amountDue > 0 && (
+                                <span className="text-amber-400 font-bold">Due: {formatCurrency(b.amountDue)}</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Requirement 3: When cancelled, don't show cancel text, just put cross in that box */}
+                          {isCancelled ? (
+                            <div
+                              className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 font-black text-xl select-none"
+                              title="Booking Cancelled"
+                            >
+                              ✕
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              {hasDue ? (
+                                <button
+                                  onClick={() => {
+                                    setSettlementBooking(b);
+                                    setSettlementAmount(b.amountDue);
+                                  }}
+                                  className="bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold px-3.5 py-2 rounded-lg transition-colors cursor-pointer shadow-md"
+                                >
+                                  Collect ₹{b.amountDue}
+                                </button>
+                              ) : (
+                                <span className="bg-emerald-500/10 text-emerald-400 text-xs font-bold px-3 py-1.5 rounded-lg border border-emerald-500/20">
+                                  ✓ Paid Full
+                                </span>
+                              )}
+
+                              {/* Toggle Roster & Split Ledger */}
+                              <button
+                                onClick={() => handleToggleBookingRoster(b)}
+                                className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold px-3 py-2 rounded-lg border border-slate-700 flex items-center gap-1.5 transition-colors cursor-pointer"
+                                title="View Players Played in Slot & Match Ledger"
+                              >
+                                <Users className="w-3.5 h-3.5 text-indigo-400" />
+                                <span>Roster/Ledger</span>
+                                {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                              </button>
+
+                              {/* WhatsApp Booking Confirmation Pass Button */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (planFeatures.whatsappNotifications === false) {
+                                    showToast('WhatsApp booking passes require a Pro SaaS plan. Upgrade your subscription to send automated WhatsApp tickets.', 'error');
+                                    setCurrentTab('subscription');
+                                    return;
+                                  }
+                                  const ok = openWhatsAppNotification(b, b.playerPhone, 'OWNER');
+                                  if (ok) {
+                                    showToast('Opening WhatsApp with booking ticket for player!', 'success');
+                                  } else {
+                                    showToast('Could not open WhatsApp. Ensure popup is allowed.', 'error');
+                                  }
+                                }}
+                                className={planFeatures.whatsappNotifications === false
+                                  ? "bg-slate-800/60 hover:bg-slate-800 text-slate-400 border border-slate-700/60 text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                                  : "bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                                }
+                                title={planFeatures.whatsappNotifications === false ? "WhatsApp pass locked (Pro SaaS Plan)" : "Send booking confirmation pass to player via WhatsApp"}
+                              >
+                                <MessageSquare className={`w-3.5 h-3.5 ${planFeatures.whatsappNotifications === false ? 'text-slate-500' : 'text-[#25D366]'}`} />
+                                <span>WhatsApp Pass</span>
+                                {planFeatures.whatsappNotifications === false && (
+                                  <Lock className="w-3 h-3 text-amber-400 ml-0.5" />
+                                )}
+                              </button>
+                            </div>
                           )}
                         </div>
                       </div>
 
-                      {b.amountDue > 0 ? (
-                        <button
-                          onClick={() => {
-                            setSettlementBooking(b);
-                            setSettlementAmount(b.amountDue);
-                          }}
-                          className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-lg transition-colors cursor-pointer shadow-md shadow-indigo-950/50"
-                        >
-                          Collect Due
-                        </button>
-                      ) : (
-                        <span className="bg-indigo-500/10 text-indigo-400 text-xs font-bold px-3 py-1.5 rounded-lg border border-indigo-500/20">
-                          ✓ Settled
-                        </span>
+                      {/* Requirement 1 & 2: Owner can see players played in game in roster/ledger (Lobby Match vs Individual Booking) */}
+                      {isExpanded && !isCancelled && (
+                        <div className="mt-4 pt-4 border-t border-slate-800/80 bg-slate-950/60 rounded-xl p-4 space-y-3">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div>
+                              <h4 className="text-xs font-bold text-slate-200 flex items-center gap-2">
+                                {isLobby ? (
+                                  <>
+                                    <Trophy className="w-4 h-4 text-purple-400" />
+                                    <span>Community Match Lobby Roster & Player Ledger</span>
+                                    {b.lobbyId && (
+                                      <span className="bg-purple-500/20 text-purple-300 text-[10px] px-2 py-0.5 rounded border border-purple-500/30 font-mono">
+                                        Lobby #{b.lobbyId.slice(-6)}
+                                      </span>
+                                    )}
+                                  </>
+                                ) : (
+                                  <>
+                                    <User className="w-4 h-4 text-sky-400" />
+                                    <span>Individual Booking Ledger & Player Roster</span>
+                                    <span className="bg-sky-500/20 text-sky-300 text-[10px] px-2 py-0.5 rounded border border-sky-500/30">
+                                      {b.bookingType === 'OWNER' ? 'Venue Walk-in' : 'Private Booking'}
+                                    </span>
+                                  </>
+                                )}
+                              </h4>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                {isLobby
+                                  ? `Host: ${b.playerName} • Registered community athletes and match dues`
+                                  : `Booked by: ${b.playerName} • Total players in slot: ${totalPlayersCount}`}
+                              </p>
+                            </div>
+                            <div className="text-[11px] text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800 flex items-center gap-3">
+                              <span>Slot Value: <strong className="text-white">₹{b.totalAmount}</strong></span>
+                              <span>•</span>
+                              <span>Collected: <strong className="text-emerald-400">₹{b.amountPaid}</strong></span>
+                              <span>•</span>
+                              <span>Pending: <strong className="text-amber-400">₹{b.amountDue}</strong></span>
+                            </div>
+                          </div>
+
+                          {/* CASE 1: LOBBY HOSTED MATCH */}
+                          {isLobby && b.lobbyId ? (
+                            loadingRosterMap[b.lobbyId] ? (
+                              <div className="py-6 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                                <RefreshCw className="w-4 h-4 animate-spin text-purple-400" />
+                                <span>Loading match players from lobby roster...</span>
+                              </div>
+                            ) : (lobbyPlayersMap[b.lobbyId] && lobbyPlayersMap[b.lobbyId].length > 0) ? (
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-left text-xs">
+                                  <thead>
+                                    <tr className="border-b border-slate-800 text-slate-400">
+                                      <th className="py-2 px-3 font-semibold">Player</th>
+                                      <th className="py-2 px-3 font-semibold">Role</th>
+                                      <th className="py-2 px-3 font-semibold">Sport & Skill</th>
+                                      <th className="py-2 px-3 font-semibold">Payment Mode</th>
+                                      <th className="py-2 px-3 font-semibold">Amount Paid</th>
+                                      <th className="py-2 px-3 font-semibold">Pending Due</th>
+                                      <th className="py-2 px-3 font-semibold">Status</th>
+                                      <th className="py-2 px-3 font-semibold text-right">Action</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-800/60">
+                                    {lobbyPlayersMap[b.lobbyId].map((lp, lpIdx) => {
+                                      const pDue = lp.amountDue ?? (lp.paymentStatus === 'PAID' ? 0 : (lp.paymentMethod === 'PAY_LATER_AT_TURF' ? hostShare : 0));
+                                      const pPaid = lp.amountPaid ?? (lp.paymentStatus === 'PAID' ? hostShare : 0);
+                                      const isSettled = lp.paymentStatus === 'PAID' || pDue === 0;
+
+                                      return (
+                                        <tr key={`lp-${b.id}-${lp.id || lp.uid || lpIdx}`} className="hover:bg-slate-900/40">
+                                          <td className="py-2.5 px-3">
+                                            <div className="flex items-center gap-2">
+                                              {lp.playerPhotoURL ? (
+                                                <img
+                                                  src={lp.playerPhotoURL}
+                                                  alt={lp.playerName}
+                                                  referrerPolicy="no-referrer"
+                                                  className="w-6 h-6 rounded-full object-cover border border-slate-700"
+                                                />
+                                              ) : (
+                                                <div className="w-6 h-6 rounded-full bg-purple-950 text-purple-300 font-bold flex items-center justify-center text-[10px] border border-purple-700/50">
+                                                  {lp.playerName ? lp.playerName[0].toUpperCase() : 'P'}
+                                                </div>
+                                              )}
+                                              <div>
+                                                <div className="font-bold text-white flex items-center gap-1.5">
+                                                  <span>{lp.playerName}</span>
+                                                  {lp.isHost && (
+                                                    <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.2 rounded font-semibold">
+                                                      Host
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                {lp.playerPhone && (
+                                                  <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                                                    <Phone className="w-2.5 h-2.5 text-slate-500" />
+                                                    <span>{lp.playerPhone}</span>
+                                                  </div>
+                                                )}
+                                              </div>
+                                            </div>
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            {lp.isHost ? (
+                                              <span className="bg-amber-500/10 text-amber-400 text-[10px] font-bold px-2 py-0.5 rounded border border-amber-500/30">
+                                                Match Host
+                                              </span>
+                                            ) : (
+                                              <span className="bg-purple-500/10 text-purple-300 text-[10px] font-medium px-2 py-0.5 rounded border border-purple-500/30">
+                                                Community Player
+                                              </span>
+                                            )}
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            <div className="text-slate-300 font-medium">{lp.preferredSport || b.sport}</div>
+                                            <div className="text-[10px] text-slate-500">{lp.skillLevel || 'Athlete'}</div>
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            <span className="text-slate-300 text-[11px]">
+                                              {lp.paymentMethod === 'PAY_LATER_AT_TURF' ? 'Pay at Turf' : 'Online'}
+                                            </span>
+                                          </td>
+                                          <td className="py-2.5 px-3 font-mono text-emerald-400 font-bold">
+                                            ₹{pPaid}
+                                          </td>
+                                          <td className="py-2.5 px-3 font-mono font-bold">
+                                            {pDue > 0 ? (
+                                              <span className="text-amber-400">₹{pDue}</span>
+                                            ) : (
+                                              <span className="text-slate-500">₹0</span>
+                                            )}
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            {isSettled ? (
+                                              <span className="text-emerald-400 font-bold text-[11px]">✓ Settled</span>
+                                            ) : (
+                                              <span className="text-amber-400 font-bold text-[11px]">Due</span>
+                                            )}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-right">
+                                            {pDue > 0 && (
+                                              <button
+                                                onClick={() => {
+                                                  setSettlementBooking(b);
+                                                  setSettlementAmount(pDue);
+                                                }}
+                                                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] px-2.5 py-1 rounded transition-colors cursor-pointer shadow-sm"
+                                              >
+                                                Collect ₹{pDue}
+                                              </button>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              /* Fallback for lobby match when sub-players haven't joined yet */
+                              <div className="space-y-3">
+                                <div className="text-xs text-slate-400 italic bg-purple-950/20 border border-purple-800/30 p-2.5 rounded-lg">
+                                  Community match hosted by {b.playerName}. Waiting for community players to join or check-in at turf.
+                                </div>
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-left text-xs">
+                                    <thead>
+                                      <tr className="border-b border-slate-800 text-slate-400">
+                                        <th className="py-2 px-3 font-semibold">Player</th>
+                                        <th className="py-2 px-3 font-semibold">Role</th>
+                                        <th className="py-2 px-3 font-semibold">Amount Paid</th>
+                                        <th className="py-2 px-3 font-semibold">Pending Due</th>
+                                        <th className="py-2 px-3 font-semibold">Status</th>
+                                        <th className="py-2 px-3 font-semibold text-right">Action</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-800/60">
+                                      <tr className="hover:bg-slate-900/40">
+                                        <td className="py-2.5 px-3">
+                                          <div className="font-bold text-white">{b.playerName}</div>
+                                          <div className="text-[10px] text-slate-500 font-mono">{b.playerPhone || b.playerEmail}</div>
+                                        </td>
+                                        <td className="py-2.5 px-3">
+                                          <span className="bg-amber-500/20 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded border border-amber-500/30">
+                                            Lobby Host
+                                          </span>
+                                        </td>
+                                        <td className="py-2.5 px-3 font-mono text-emerald-400 font-bold">₹{b.amountPaid}</td>
+                                        <td className="py-2.5 px-3 font-mono font-bold">
+                                          {b.amountDue > 0 ? <span className="text-amber-400">₹{b.amountDue}</span> : <span className="text-slate-500">₹0</span>}
+                                        </td>
+                                        <td className="py-2.5 px-3">
+                                          {b.amountDue === 0 ? <span className="text-emerald-400 font-bold text-[11px]">✓ Settled</span> : <span className="text-amber-400 font-bold text-[11px]">Due</span>}
+                                        </td>
+                                        <td className="py-2.5 px-3 text-right">
+                                          {b.amountDue > 0 && (
+                                            <button
+                                              onClick={() => {
+                                                setSettlementBooking(b);
+                                                setSettlementAmount(b.amountDue);
+                                              }}
+                                              className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] px-2.5 py-1 rounded transition-colors cursor-pointer"
+                                            >
+                                              Collect ₹{b.amountDue}
+                                            </button>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            )
+                          ) : (
+                            /* CASE 2: INDIVIDUAL BOOKING ROSTER / LEDGER */
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-xs">
+                                <thead>
+                                  <tr className="border-b border-slate-800 text-slate-400">
+                                    <th className="py-2 px-3 font-semibold">Player</th>
+                                    <th className="py-2 px-3 font-semibold">Role</th>
+                                    <th className="py-2 px-3 font-semibold">Split Share</th>
+                                    <th className="py-2 px-3 font-semibold">Amount Paid</th>
+                                    <th className="py-2 px-3 font-semibold">Pending Due</th>
+                                    <th className="py-2 px-3 font-semibold">Status</th>
+                                    <th className="py-2 px-3 font-semibold text-right">Action</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-800/60">
+                                  {/* Primary Athlete / Booker Row */}
+                                  <tr className="hover:bg-slate-900/40">
+                                    <td className="py-2.5 px-3">
+                                      <div className="font-bold text-white">{b.playerName}</div>
+                                      <div className="text-[10px] text-slate-500 font-mono">{b.playerPhone || b.playerEmail}</div>
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      <span className="bg-sky-500/20 text-sky-300 text-[10px] font-bold px-2 py-0.5 rounded border border-sky-500/30">
+                                        Primary Booker
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 px-3 font-mono font-medium text-slate-200">
+                                      ₹{hostShare}
+                                    </td>
+                                    <td className="py-2.5 px-3 font-mono text-emerald-400 font-bold">
+                                      ₹{hostPaid}
+                                    </td>
+                                    <td className="py-2.5 px-3 font-mono font-bold">
+                                      {hostDue > 0 ? (
+                                        <span className="text-amber-400">₹{hostDue}</span>
+                                      ) : (
+                                        <span className="text-slate-500">₹0</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      {hostDue === 0 ? (
+                                        <span className="text-emerald-400 font-bold text-[11px]">✓ Settled</span>
+                                      ) : (
+                                        <span className="text-amber-400 font-bold text-[11px]">Due</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right">
+                                      {hostDue > 0 && (
+                                        <button
+                                          onClick={() => {
+                                            setSettlementBooking(b);
+                                            setSettlementAmount(hostDue);
+                                          }}
+                                          className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] px-2.5 py-1 rounded transition-colors cursor-pointer"
+                                        >
+                                          Collect ₹{hostDue}
+                                        </button>
+                                      )}
+                                    </td>
+                                  </tr>
+
+                                  {/* Split Roster Rows if present */}
+                                  {b.splitWith && b.splitWith.length > 0 ? (
+                                    b.splitWith.map((p, idx) => {
+                                      const pShare = p.shareAmount || hostShare;
+                                      const pPaid = p.isPaid ? pShare : 0;
+                                      const pDue = p.isPaid ? 0 : pShare;
+                                      return (
+                                        <tr key={`split-${b.id}-${p.phone || p.email || idx}`} className="hover:bg-slate-900/40">
+                                          <td className="py-2.5 px-3">
+                                            <div className="font-medium text-slate-200">{p.name}</div>
+                                            <div className="text-[10px] text-slate-500 font-mono">{p.phone || p.email || `Player #${idx + 2}`}</div>
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            <span className="bg-slate-800 text-slate-400 text-[10px] font-medium px-2 py-0.5 rounded border border-slate-700">
+                                              Split Player
+                                            </span>
+                                          </td>
+                                          <td className="py-2.5 px-3 font-mono font-medium text-slate-200">
+                                            ₹{pShare}
+                                          </td>
+                                          <td className="py-2.5 px-3 font-mono text-emerald-400 font-bold">
+                                            ₹{pPaid}
+                                          </td>
+                                          <td className="py-2.5 px-3 font-mono font-bold">
+                                            {pDue > 0 ? (
+                                              <span className="text-amber-400">₹{pDue}</span>
+                                            ) : (
+                                              <span className="text-slate-500">₹0</span>
+                                            )}
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            {p.isPaid ? (
+                                              <span className="text-emerald-400 font-bold text-[11px]">✓ Settled</span>
+                                            ) : (
+                                              <span className="text-amber-400 font-bold text-[11px]">Due</span>
+                                            )}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-right">
+                                            {!p.isPaid && (
+                                              <button
+                                                onClick={() => {
+                                                  setSettlementBooking(b);
+                                                  setSettlementAmount(pDue);
+                                                }}
+                                                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] px-2.5 py-1 rounded transition-colors cursor-pointer"
+                                              >
+                                                Collect ₹{pDue}
+                                              </button>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })
+                                  ) : (
+                                    // When no explicit split is saved, show general squad quota balance
+                                    totalPlayersCount > 1 && (
+                                      Array.from({ length: totalPlayersCount - 1 }).map((_, i) => (
+                                        <tr key={`squad-${b.id}-${i}`} className="hover:bg-slate-900/40">
+                                          <td className="py-2.5 px-3">
+                                            <div className="font-medium text-slate-300">Squad Player #{i + 2}</div>
+                                            <div className="text-[10px] text-slate-500">In group match roster</div>
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            <span className="bg-slate-800 text-slate-400 text-[10px] font-medium px-2 py-0.5 rounded">
+                                              Squad Mate
+                                            </span>
+                                          </td>
+                                          <td className="py-2.5 px-3 font-mono text-slate-300">₹{hostShare}</td>
+                                          <td className="py-2.5 px-3 font-mono text-emerald-400">
+                                            ₹{b.amountPaid >= (i + 2) * hostShare ? hostShare : Math.max(0, b.amountPaid - hostShare - i * hostShare)}
+                                          </td>
+                                          <td className="py-2.5 px-3 font-mono text-amber-400">
+                                            ₹{Math.max(0, hostShare - (b.amountPaid >= (i + 2) * hostShare ? hostShare : Math.max(0, b.amountPaid - hostShare - i * hostShare)))}
+                                          </td>
+                                          <td className="py-2.5 px-3">
+                                            {b.amountPaid >= (i + 2) * hostShare ? (
+                                              <span className="text-emerald-400 font-bold text-[11px]">✓ Settled</span>
+                                            ) : (
+                                              <span className="text-amber-400 font-bold text-[11px]">Due</span>
+                                            )}
+                                          </td>
+                                          <td className="py-2.5 px-3 text-right">
+                                            {b.amountDue > 0 && (
+                                              <button
+                                                onClick={() => {
+                                                  setSettlementBooking(b);
+                                                  setSettlementAmount(Math.min(hostShare, b.amountDue));
+                                                }}
+                                                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] px-2.5 py-1 rounded transition-colors cursor-pointer"
+                                              >
+                                                Collect
+                                              </button>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      ))
+                                    )
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
         )}
 
+        {/* TAB: OWNER SUBSCRIPTION */}
+        {currentTab === 'subscription' && <OwnerSubscriptionTab showToast={showToast} />}
+
+        {/* TAB: OWNER BRAND PROFILE & COMMUNITY FEED */}
+        {currentTab === 'brand-profile' && (
+          <OwnerBrandProfileTab
+            turfs={turfs}
+            showToast={showToast}
+            onNavigateToSubscription={() => setCurrentTab('subscription')}
+          />
+        )}
+
         {/* TAB: OWNER ANALYTICS DASHBOARD */}
-        {currentTab === 'analytics' && <OwnerAnalyticsDashboard />}
+        {currentTab === 'analytics' && (
+          planFeatures.analytics !== false ? (
+            <OwnerAnalyticsDashboard
+              showToast={showToast}
+              planFeatures={planFeatures}
+              onNavigateToSubscription={() => setCurrentTab('subscription')}
+            />
+          ) : (
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-12 text-center max-w-xl mx-auto space-y-4 my-8 shadow-2xl">
+              <div className="w-16 h-16 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-2xl flex items-center justify-center mx-auto">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-extrabold text-white">Revenue Analytics Module Locked</h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                Occupancy charts, revenue reports, and peak hour heatmaps are disabled in your current subscription plan. Upgrade your plan to unlock full venue analytics.
+              </p>
+              <button
+                onClick={() => setCurrentTab('subscription')}
+                className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold px-6 py-3 rounded-xl text-xs flex items-center gap-2 mx-auto shadow-lg shadow-emerald-950/50 transition-all cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>View Subscription Plans & Upgrade</span>
+              </button>
+            </div>
+          )
+        )}
 
         {/* TAB: PROMOTIONS & OFFERS */}
-        {currentTab === 'offers' && <OwnerOffersTab turfs={turfs} showToast={showToast} />}
+        {currentTab === 'offers' && (
+          planFeatures.offers !== false ? (
+            <OwnerOffersTab turfs={turfs} showToast={showToast} planFeatures={planFeatures} />
+          ) : (
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-12 text-center max-w-xl mx-auto space-y-4 my-8 shadow-2xl">
+              <div className="w-16 h-16 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-2xl flex items-center justify-center mx-auto">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-extrabold text-white">Offers & Promo Codes Locked</h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                Custom coupon creation and promo code management are disabled in your current subscription plan. Upgrade your plan to create promotional campaigns.
+              </p>
+              <button
+                onClick={() => setCurrentTab('subscription')}
+                className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold px-6 py-3 rounded-xl text-xs flex items-center gap-2 mx-auto shadow-lg shadow-emerald-950/50 transition-all cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>View Subscription Plans & Upgrade</span>
+              </button>
+            </div>
+          )
+        )}
 
         {/* TAB: REVIEWS & RATINGS */}
-        {currentTab === 'reviews' && <OwnerReviewsTab turfs={turfs} showToast={showToast} />}
+        {currentTab === 'reviews' && (
+          planFeatures.reviewsManager !== false ? (
+            <OwnerReviewsTab turfs={turfs} showToast={showToast} />
+          ) : (
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-12 text-center max-w-xl mx-auto space-y-4 my-8 shadow-2xl">
+              <div className="w-16 h-16 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-2xl flex items-center justify-center mx-auto">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-extrabold text-white">Reviews & Ratings Management Locked</h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                Customer ratings and review moderation are disabled in your current subscription plan. Upgrade your plan to manage player feedback.
+              </p>
+              <button
+                onClick={() => setCurrentTab('subscription')}
+                className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold px-6 py-3 rounded-xl text-xs flex items-center gap-2 mx-auto shadow-lg shadow-emerald-950/50 transition-all cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>View Subscription Plans & Upgrade</span>
+              </button>
+            </div>
+          )
+        )}
 
         {/* TAB: OWNER PAYMENT ID & PAYOUTS */}
         {(currentTab === 'payments' || currentTab === 'payouts') && (
@@ -1546,192 +2878,221 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
 
         {/* TAB: PLAYERS DUES & COUNTER SETTLEMENTS */}
         {currentTab === 'dues' && (
-          <OwnerPlayerDues
-            showToast={showToast}
-            onSettleBooking={(b) => {
-              setSettlementBooking(b);
-              setSettlementAmount(b.amountDue);
-            }}
-          />
+          planFeatures.duesTracker !== false ? (
+            <OwnerPlayerDues
+              showToast={showToast}
+              onSettleBooking={(b) => {
+                setSettlementBooking(b);
+                setSettlementAmount(b.amountDue);
+              }}
+            />
+          ) : (
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 sm:p-12 text-center max-w-xl mx-auto space-y-4 my-8 shadow-2xl">
+              <div className="w-16 h-16 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-2xl flex items-center justify-center mx-auto">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-extrabold text-white">Player Dues Tracker Locked</h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                Offline cash dues tracking and player balance ledgers are disabled in your current subscription plan. Upgrade your plan to track unpaid balances.
+              </p>
+              <button
+                onClick={() => setCurrentTab('subscription')}
+                className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold px-6 py-3 rounded-xl text-xs flex items-center gap-2 mx-auto shadow-lg shadow-emerald-950/50 transition-all cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>View Subscription Plans & Upgrade</span>
+              </button>
+            </div>
+          )
         )}
 
         {/* TAB: PROFILE & BUSINESS SETTINGS */}
         {currentTab === 'profile' && (
-          <div className="max-w-2xl mx-auto space-y-6">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
-              <div className="flex items-center gap-4">
-                <div className="w-16 h-16 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-extrabold text-2xl shadow-lg shadow-indigo-600/30">
-                  {profile?.displayName?.charAt(0) || 'O'}
-                </div>
-                <div>
-                  <h2 className="text-xl font-bold text-white">{profile?.displayName}</h2>
-                  <p className="text-xs text-slate-400">{profile?.email}</p>
-                  <span className="bg-indigo-500/20 text-indigo-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-indigo-500/30 uppercase mt-1 inline-block">
-                    Verified Turf Owner
-                  </span>
-                </div>
-              </div>
-
-              {/* Quick Payment ID Banner */}
-              <div className="bg-slate-950/80 border border-indigo-500/30 rounded-2xl p-4 flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-                    <QrCode className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-400 block">
-                      Receiving Payment ID (UPI)
-                    </span>
-                    <span className="text-xs font-mono font-bold text-white">
-                      {profile?.paymentSettings?.upiId || 'No UPI ID configured yet'}
-                    </span>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setCurrentTab('payments')}
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3.5 py-2 rounded-xl transition-all shadow-md cursor-pointer"
-                >
-                  Configure Payouts →
-                </button>
-              </div>
-
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  try {
-                    await updateUserProfile({
-                      displayName: editName,
-                      phoneNumber: editPhone,
-                      city: editCity,
-                      bio: editBio,
-                      businessName: editBusiness,
-                      paymentSettings: {
-                        ...(profile?.paymentSettings || {}),
-                        upiId: editUpiId.trim(),
-                        beneficiaryName:
-                          editBeneficiaryName.trim() || editBusiness.trim() || editName.trim(),
-                        updatedAt: new Date().toISOString(),
-                      },
-                    });
-                    showToast('Owner profile and payment ID updated successfully!');
-                  } catch (err) {
-                    showToast('Failed to update profile.', 'error');
-                  }
-                }}
-                className="space-y-4 pt-4 border-t border-slate-800"
+          <div className="max-w-4xl mx-auto space-y-6">
+            {/* Sub-tab Navigation Header */}
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+              <button
+                type="button"
+                id="owner-profile-subtab-account"
+                onClick={() => setOwnerProfileTab('profile')}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  ownerProfileTab === 'profile'
+                    ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-950/50'
+                    : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                }`}
               >
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Full Name</label>
-                  <input
-                    type="text"
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                  />
-                </div>
+                <User className="w-4 h-4" />
+                <span>Account & Business Settings</span>
+              </button>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">
-                    Business / Brand Name
-                  </label>
-                  <input
-                    type="text"
-                    value={editBusiness}
-                    onChange={(e) => setEditBusiness(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                  />
-                </div>
-
-                {/* Direct Payment ID Input in Profile */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800">
-                  <div>
-                    <label className="block text-xs font-bold text-indigo-400 mb-1 flex items-center gap-1">
-                      <QrCode className="w-3.5 h-3.5" />
-                      <span>Primary UPI ID / VPA</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={editUpiId}
-                      onChange={(e) => setEditUpiId(e.target.value.toLowerCase().trim())}
-                      placeholder="e.g. turf@okhdfcbank"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1">
-                      Beneficiary Account Name
-                    </label>
-                    <input
-                      type="text"
-                      value={editBeneficiaryName}
-                      onChange={(e) => setEditBeneficiaryName(e.target.value)}
-                      placeholder="e.g. Apex Sports Arena"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">Phone</label>
-                    <input
-                      type="tel"
-                      value={editPhone}
-                      onChange={(e) => setEditPhone(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">City</label>
-                    <input
-                      type="text"
-                      value={editCity}
-                      onChange={(e) => setEditCity(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 mb-1">Business Bio</label>
-                  <textarea
-                    rows={3}
-                    value={editBio}
-                    onChange={(e) => setEditBio(e.target.value)}
-                    placeholder="Short description of your sports facility and turf venues..."
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg transition-all shadow-lg shadow-indigo-950/50 cursor-pointer text-xs uppercase tracking-wider"
-                >
-                  Save Profile & Payment ID
-                </button>
-              </form>
-
-              <div className="pt-4 border-t border-slate-800 flex flex-col gap-2">
-                <span className="text-xs font-semibold text-slate-400">Account Role</span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      await updateUserProfile({ role: 'PLAYER' });
-                      showToast('Switched account mode to Player!');
-                    } catch (err) {
-                      showToast('Failed to switch role.', 'error');
-                    }
-                  }}
-                  className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors"
-                >
-                  Switch to Player / Discovery Portal
-                </button>
-              </div>
+              <button
+                type="button"
+                id="owner-profile-subtab-brand"
+                onClick={() => setOwnerProfileTab('brand')}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  ownerProfileTab === 'brand'
+                    ? 'bg-amber-600 text-white shadow-lg shadow-amber-950/50'
+                    : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                }`}
+              >
+                <Building2 className="w-4 h-4 text-amber-400" />
+                <span>Official Brand Page</span>
+                {brandProfile?.isVerified && (
+                  <span className="bg-amber-500/20 text-amber-300 text-[9px] px-1.5 py-0.5 rounded font-black border border-amber-500/30">
+                    VERIFIED
+                  </span>
+                )}
+                {brandProfile && (
+                  <span className="text-slate-400 text-[10px] ml-1">
+                    {brandProfile.handle || `@${brandProfile.brandName.toLowerCase().replace(/\s+/g, '')}`}
+                  </span>
+                )}
+              </button>
             </div>
+
+            {/* Sub-view 1: Account Settings with integrated Brand Overview Card */}
+            {ownerProfileTab === 'profile' && (
+              <div className="max-w-2xl mx-auto space-y-6">
+                {/* Official Brand Page Snapshot Card */}
+                {brandProfile ? (
+                  <div className="bg-gradient-to-r from-amber-950/30 via-slate-900 to-slate-900 border border-amber-500/30 rounded-2xl p-5 shadow-xl relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-48 h-48 bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
+                    <div className="flex items-start justify-between gap-4 flex-wrap relative z-10">
+                      <div className="flex items-center gap-3.5">
+                        <div className="w-14 h-14 rounded-2xl overflow-hidden bg-slate-950 border border-amber-500/30 shadow-md flex-shrink-0 flex items-center justify-center">
+                          {brandProfile.logoUrl ? (
+                            <img
+                              src={brandProfile.logoUrl}
+                              alt={brandProfile.brandName}
+                              className="w-full h-full object-cover"
+                              referrerPolicy="no-referrer"
+                            />
+                          ) : (
+                            <Building2 className="w-7 h-7 text-amber-400" />
+                          )}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h3 className="text-base font-extrabold text-white">{brandProfile.brandName}</h3>
+                            {brandProfile.isVerified && (
+                              <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] font-black px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
+                                <ShieldCheck className="w-3 h-3 text-amber-400" />
+                                <span>Verified Partner</span>
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-amber-400/90 font-mono font-bold mt-0.5">
+                            {brandProfile.handle || `@${brandProfile.brandName.toLowerCase().replace(/\s+/g, '')}`}
+                          </p>
+                          <div className="flex items-center gap-3 text-xs text-slate-400 mt-1.5">
+                            <span className="flex items-center gap-1 text-white font-semibold">
+                              <Users className="w-3.5 h-3.5 text-amber-400" />
+                              {brandProfile.followersCount || 0} Followers
+                            </span>
+                            <span>•</span>
+                            <span className="flex items-center gap-1 text-slate-300">
+                              <MapPin className="w-3.5 h-3.5 text-indigo-400" />
+                              {brandProfile.city || profile?.city || 'Local Arena'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 mt-2 sm:mt-0">
+                        <button
+                          type="button"
+                          id="btn-owner-preview-brand-profile"
+                          onClick={() => setIsPreviewBrandOpen(true)}
+                          className="bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-bold px-3.5 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-1.5"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-amber-400" />
+                          <span>View Public Page</span>
+                        </button>
+                        <button
+                          type="button"
+                          id="btn-owner-manage-brand-profile"
+                          onClick={() => setOwnerProfileTab('brand')}
+                          className="bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-slate-950 text-xs font-black px-3.5 py-2 rounded-xl transition-all cursor-pointer shadow-md shadow-amber-950/40 flex items-center gap-1.5"
+                        >
+                          <Pencil className="w-3.5 h-3.5 text-slate-950" />
+                          <span>Edit Brand Page</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {brandProfile.tagline && (
+                      <p className="text-xs text-slate-300 mt-3 pt-3 border-t border-slate-800/80 italic">
+                        "{brandProfile.tagline}"
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="bg-gradient-to-r from-amber-950/20 via-slate-900 to-slate-900 border border-amber-500/20 rounded-2xl p-5 shadow-lg flex items-center justify-between gap-4 flex-wrap">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center flex-shrink-0">
+                        <Building2 className="w-6 h-6 text-amber-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white">Create Official Arena Brand Page</h3>
+                        <p className="text-xs text-slate-400 mt-0.5 max-w-md">
+                          Give your facility an official public identity on the TurFit community feed. Showcase photos, gain followers, and run verified flash promotions.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      id="btn-owner-setup-brand-page"
+                      onClick={() => setOwnerProfileTab('brand')}
+                      className="bg-amber-600 hover:bg-amber-500 text-slate-950 font-black text-xs px-4 py-2.5 rounded-xl transition-all shadow-md shadow-amber-950/40 cursor-pointer flex items-center gap-1.5 whitespace-nowrap"
+                    >
+                      <Plus className="w-4 h-4 text-slate-950" />
+                      <span>Set Up Brand Page</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Account & Profile Social Card */}
+                {profile && (
+                  <SocialProfileView
+                    profile={profile}
+                    isSelf={true}
+                    showToast={showToast}
+                  />
+                )}
+
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-slate-400 block">Account Role</span>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="text-xs font-bold text-indigo-400 bg-indigo-950/80 border border-indigo-500/30 px-2.5 py-1 rounded-md">
+                        {isAdmin || profile?.role === 'ADMIN' ? 'Super Administrator' : 'Turf Owner / Ground Manager'}
+                      </span>
+                    </div>
+                  </div>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveRole('PLAYER');
+                        showToast('Admin: Switched view to Player Portal');
+                      }}
+                      className="bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 font-bold py-2 px-3.5 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <span>Switch to Player View →</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Sub-view 2: Full Brand Page Editor inside Owner Profile */}
+            {ownerProfileTab === 'brand' && (
+              <OwnerBrandProfileTab
+                turfs={turfs}
+                showToast={showToast}
+                onNavigateToSubscription={() => setCurrentTab('subscription')}
+              />
+            )}
           </div>
         )}
       </main>
@@ -1740,18 +3101,111 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
       {showAddTurfModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 max-w-2xl w-full my-8 max-h-[90vh] overflow-y-auto shadow-2xl">
-            <h2 className="text-xl font-bold text-white mb-1">Add Sports Turf</h2>
-            <p className="text-xs text-slate-400 mb-6">Create a real turf listing with location, timing, and photos</p>
+            <h2 className="text-xl font-bold text-white mb-1">
+              {turfFacilityCategory === 'INDOOR_GAME'
+                ? 'Add Dedicated Gaming Zone Arena'
+                : 'Add Outdoor Sports Turf'}
+            </h2>
+            <p className="text-xs text-slate-400 mb-5">
+              Create a venue listing for outdoor pitch sports or indoor gaming lounge tables
+            </p>
 
             <form onSubmit={handleCreateTurf} className="space-y-4">
+              {/* Category Selector: Outdoor Turf vs Dedicated Gaming Zone */}
+              <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800">
+                <label className="block text-xs font-bold text-slate-200 mb-1">
+                  What type of venue are you registering? *
+                </label>
+                <div className="grid grid-cols-2 gap-2.5 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTurfFacilityCategory('OUTDOOR_TURF');
+                      setTurfSports(['Football', 'Box Cricket']);
+                      setTurfBasePrice(1200);
+                      if (!turfName || turfName.includes('Gaming')) setTurfName('Apex Sports Turf & Arena');
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col ${
+                      turfFacilityCategory === 'OUTDOOR_TURF'
+                        ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 ring-1 ring-emerald-500/50'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="font-bold text-xs text-white flex items-center gap-1.5">
+                      <span>🌿</span> Outdoor Sports Turf
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-1">Football, Box Cricket, Tennis, Badminton</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTurfFacilityCategory('INDOOR_GAME');
+                      setTurfSports(['Pool', 'Snooker', 'Table Tennis', 'Carrom', 'PS5', 'Foosball']);
+                      setTurfFacilities(['Air Conditioning', 'AC Player Lounge', 'Refreshment Cafe', 'Sanitized Equipment']);
+                      setTurfBasePrice(250);
+                      if (!turfName || turfName.includes('Sports')) setTurfName('CyberPulse Gaming & Snooker Zone');
+                      if (!turfDesc) setTurfDesc('Climate-controlled indoor gaming zone with tournament tables, AC lounge, and snacks.');
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col ${
+                      turfFacilityCategory === 'INDOOR_GAME'
+                        ? 'bg-amber-500/15 border-amber-500 text-amber-300 ring-1 ring-amber-500/50'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="font-bold text-xs text-white flex items-center gap-1.5">
+                      <span>🎮</span> Dedicated Gaming Zone Arena
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-1">Pool, Snooker, Table Tennis, PS5, Carrom, VR</span>
+                  </button>
+                </div>
+              </div>
+
+              {turfFacilityCategory === 'INDOOR_GAME' && (
+                <div>
+                  <label className="block text-xs font-medium text-amber-300 mb-1">
+                    Primary Game / Table Station *
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {[
+                      { id: 'Pool', label: '🎱 Snooker & Pool' },
+                      { id: 'Table Tennis', label: '🏓 Table Tennis' },
+                      { id: 'Carrom', label: '🎯 Carrom Board' },
+                      { id: 'Foosball', label: '⚽ Foosball' },
+                      { id: 'Console PS5', label: '🎮 PS5 Lounge' },
+                      { id: 'VR Gaming', label: '🥽 VR Virtual Reality' },
+                    ].map((g) => (
+                      <button
+                        key={`turf_indoor_opt_${g.id}`}
+                        type="button"
+                        onClick={() => setTurfIndoorGameType(g.id)}
+                        className={`px-3 py-2 rounded-xl text-xs font-semibold border text-left transition-all cursor-pointer ${
+                          turfIndoorGameType === g.id
+                            ? 'bg-amber-500/20 border-amber-400 text-amber-200'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                        }`}
+                      >
+                        {turfIndoorGameType === g.id ? '✓ ' : ''}{g.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Turf Name *</label>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  {turfFacilityCategory === 'INDOOR_GAME' ? 'Gaming Zone / Arena Name *' : 'Turf Name *'}
+                </label>
                 <input
                   type="text"
                   required
                   value={turfName}
                   onChange={(e) => setTurfName(e.target.value)}
-                  placeholder="e.g. TruFit Kickoff Arena"
+                  placeholder={
+                    turfFacilityCategory === 'INDOOR_GAME'
+                      ? 'e.g. BreakPoint Gaming & Snooker Arena'
+                      : 'e.g. TurFit Kickoff Arena'
+                  }
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                 />
               </div>
@@ -1791,13 +3245,46 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                 </div>
               </div>
 
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  📍 Google Maps Location Link * <span className="text-rose-400 font-bold">(Compulsory)</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type="url"
+                    required
+                    value={turfLocationUrl}
+                    onChange={(e) => setTurfLocationUrl(e.target.value)}
+                    placeholder="e.g. https://maps.app.goo.gl/... or https://goo.gl/maps/..."
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  />
+                  {turfLocationUrl && (
+                    <a
+                      href={turfLocationUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="absolute right-3 top-2.5 text-xs text-indigo-400 hover:text-indigo-300 hover:underline flex items-center gap-1"
+                    >
+                      Test <ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Open Google Maps on your phone or browser, find your venue, tap "Share" and copy the link. When players tap "View on Map" or "Get Directions", they are guided directly here.
+                </p>
+              </div>
+
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">City</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    City * <span className="text-rose-400 font-bold">(Compulsory)</span>
+                  </label>
                   <input
                     type="text"
+                    required
                     value={turfCity}
                     onChange={(e) => setTurfCity(e.target.value)}
+                    placeholder="e.g. Mumbai, Delhi"
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
@@ -1843,58 +3330,81 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
                 />
               </div>
 
-              {/* Venue Payment ID / UPI configuration */}
-              <div className="bg-slate-950/80 border border-indigo-500/20 rounded-xl p-3 space-y-3">
-                <span className="text-xs font-bold text-indigo-400 block flex items-center gap-1.5">
-                  <QrCode className="w-3.5 h-3.5" />
-                  <span>Turf Direct Payment ID (UPI)</span>
-                </span>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Location Coordinates Selector */}
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div className="flex justify-between items-center">
+                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
+                    Location Coordinates
+                  </label>
+                  <span className="text-[10px] text-slate-500 font-mono">GPS (WGS 84)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] font-medium text-slate-400 mb-1">
-                      UPI ID / VPA (Optional)
+                    <label className="block text-[10px] font-medium text-slate-400 mb-1">
+                      Latitude
                     </label>
                     <input
-                      type="text"
-                      value={turfUpiId}
-                      onChange={(e) => setTurfUpiId(e.target.value.toLowerCase().trim())}
-                      placeholder={profile?.paymentSettings?.upiId || 'e.g. turf@okhdfcbank'}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                      type="number"
+                      step="any"
+                      value={turfLat}
+                      onChange={(e) => setTurfLat(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+                      placeholder="e.g. 12.9716"
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-medium text-slate-400 mb-1">
-                      Account / Beneficiary Name
+                    <label className="block text-[10px] font-medium text-slate-400 mb-1">
+                      Longitude
                     </label>
                     <input
-                      type="text"
-                      value={turfBeneficiary}
-                      onChange={(e) => setTurfBeneficiary(e.target.value)}
-                      placeholder="e.g. Apex Arena Payouts"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500"
+                      type="number"
+                      step="any"
+                      value={turfLng}
+                      onChange={(e) => setTurfLng(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+                      placeholder="e.g. 77.5946"
                     />
                   </div>
                 </div>
-                <p className="text-[10px] text-slate-500">
-                  Leave empty to inherit the default owner UPI ID configured in Payment Settings.
+                <p className="text-[10px] text-slate-500 italic">
+                  Enter the decimal coordinates of your turf location to allow regional distance estimation.
                 </p>
               </div>
 
-              {/* Map Pin Selector */}
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Turf Map Location (Click to set pin coordinates)
-                </label>
-                <InteractiveTurfMap
-                  userLocation={{ latitude: turfLat, longitude: turfLng }}
-                  turfs={[]}
-                  onSelectTurf={() => {}}
-                  interactiveSelectLocation={true}
-                  onLocationChange={(lat, lng) => {
-                    setTurfLat(lat);
-                    setTurfLng(lng);
-                  }}
-                />
+              {/* Pay at Venue Payment Acceptance Toggle */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <label className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Banknote className="w-4 h-4 text-emerald-400" />
+                      <span>Allow Pay at Venue (Counter Cash)</span>
+                    </label>
+                    <p className="text-[11px] text-slate-400">
+                      When enabled, athletes can choose to pay at the venue. When disabled, 100% online advance payment is enforced.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setTurfAllowPayAtVenue(!turfAllowPayAtVenue)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      turfAllowPayAtVenue
+                        ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/40'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}
+                  >
+                    {turfAllowPayAtVenue ? (
+                      <>
+                        <ToggleRight className="w-4 h-4 text-white" />
+                        <span>Enabled</span>
+                      </>
+                    ) : (
+                      <>
+                        <ToggleLeft className="w-4 h-4 text-slate-400" />
+                        <span>Disabled</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
 
               {/* Photo Upload */}
@@ -1946,61 +3456,506 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         </div>
       )}
 
-      {/* ================= MODAL: ADD ARENA ================= */}
-      {showAddArenaModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 max-w-md w-full shadow-2xl">
-            <h2 className="text-xl font-bold text-white mb-1">Add Arena Court</h2>
-            <p className="text-xs text-slate-400 mb-6">Add a court/pitch under {selectedTurf?.name}</p>
-
-            <form onSubmit={handleCreateArena} className="space-y-4">
+      {/* ================= MODAL: EDIT TURF ================= */}
+      {showEditTurfModal && editingTurf && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 max-w-2xl w-full my-8 max-h-[90vh] overflow-y-auto shadow-2xl">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Arena Name *</label>
+                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                  <Pencil className="w-5 h-5 text-amber-400" />
+                  <span>Edit Venue Details</span>
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Update "{editingTurf.name}" venue configuration, photos, and location
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEditTurfModal(false);
+                  setEditingTurf(null);
+                }}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
+              >
+                <XIcon className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateTurf} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Turf Name *</label>
                 <input
                   type="text"
                   required
-                  value={arenaName}
-                  onChange={(e) => setArenaName(e.target.value)}
-                  placeholder="e.g. Arena 2 - Box Cricket Court"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                  value={turfName}
+                  onChange={(e) => setTurfName(e.target.value)}
+                  placeholder="e.g. TurFit Kickoff Arena"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Sport Type</label>
-                <select
-                  value={arenaSport}
-                  onChange={(e) => setArenaSport(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option value="Football">Football / Turf Soccer</option>
-                  <option value="Box Cricket">Box Cricket</option>
-                  <option value="Badminton">Badminton</option>
-                  <option value="Basketball">Basketball</option>
-                  <option value="Pickleball">Pickleball / Tennis</option>
-                </select>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Description</label>
+                <textarea
+                  rows={2}
+                  value={turfDesc}
+                  onChange={(e) => setTurfDesc(e.target.value)}
+                  placeholder="Premium FIFA-certified turf with night floodlights and refreshments..."
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Player Capacity</label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Street Address *</label>
                   <input
-                    type="number"
-                    value={arenaCapacity}
-                    onChange={(e) => setArenaCapacity(Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                    type="text"
+                    required
+                    value={turfAddress}
+                    onChange={(e) => setTurfAddress(e.target.value)}
+                    placeholder="e.g. Linking Road, Bandra West"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Price per Slot (₹)</label>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Area / Locality</label>
                   <input
-                    type="number"
-                    value={arenaPrice}
-                    onChange={(e) => setArenaPrice(Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                    type="text"
+                    value={turfArea}
+                    onChange={(e) => setTurfArea(e.target.value)}
+                    placeholder="e.g. Bandra"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
                   />
                 </div>
               </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  📍 Google Maps Location Link * <span className="text-rose-400 font-bold">(Compulsory)</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type="url"
+                    required
+                    value={turfLocationUrl}
+                    onChange={(e) => setTurfLocationUrl(e.target.value)}
+                    placeholder="e.g. https://maps.app.goo.gl/... or https://goo.gl/maps/..."
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                  />
+                  {turfLocationUrl && (
+                    <a
+                      href={turfLocationUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="absolute right-3 top-2.5 text-xs text-amber-400 hover:text-amber-300 hover:underline flex items-center gap-1"
+                    >
+                      Test <ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Players clicking "View on Map" or "Directions" on TurFit will open this exact Google Maps link directly.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    City * <span className="text-rose-400 font-bold">(Compulsory)</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={turfCity}
+                    onChange={(e) => setTurfCity(e.target.value)}
+                    placeholder="e.g. Mumbai, Delhi"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Phone</label>
+                  <input
+                    type="tel"
+                    value={turfPhone}
+                    onChange={(e) => setTurfPhone(e.target.value)}
+                    placeholder="+91..."
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Opens</label>
+                  <input
+                    type="time"
+                    value={turfOpenTime}
+                    onChange={(e) => setTurfOpenTime(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">Closes</label>
+                  <input
+                    type="time"
+                    value={turfCloseTime}
+                    onChange={(e) => setTurfCloseTime(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Default Base Price per Hour (₹)
+                </label>
+                <input
+                  type="number"
+                  value={turfBasePrice}
+                  onChange={(e) => setTurfBasePrice(Number(e.target.value))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                />
+              </div>
+
+              {/* Pay at Venue Payment Acceptance Toggle */}
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <label className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Banknote className="w-4 h-4 text-emerald-400" />
+                      <span>Allow Pay at Venue (Counter Cash)</span>
+                    </label>
+                    <p className="text-[11px] text-slate-400">
+                      When enabled, athletes can choose to pay at the venue. When disabled, 100% online advance payment is enforced.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setTurfAllowPayAtVenue(!turfAllowPayAtVenue)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      turfAllowPayAtVenue
+                        ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/40'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}
+                  >
+                    {turfAllowPayAtVenue ? (
+                      <>
+                        <ToggleRight className="w-4 h-4 text-white" />
+                        <span>Enabled</span>
+                      </>
+                    ) : (
+                      <>
+                        <ToggleLeft className="w-4 h-4 text-slate-400" />
+                        <span>Disabled</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Photo Management */}
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Manage Turf Photos (Add / Delete)
+                </label>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  onChange={(e) => handlePhotoUpload(e, true)}
+                  className="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-amber-600 file:text-white hover:file:bg-amber-500 cursor-pointer"
+                />
+                {turfPhotos.length > 0 ? (
+                  <div className="flex gap-2.5 mt-3 overflow-x-auto p-1">
+                    {turfPhotos.map((p, idx) => (
+                      <div key={idx} className="relative group flex-shrink-0">
+                        <img
+                          src={p}
+                          alt={`Venue photo ${idx + 1}`}
+                          className="w-20 h-16 object-cover rounded-lg border border-slate-700 group-hover:border-amber-500 transition-colors"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setTurfPhotos(turfPhotos.filter((_, i) => i !== idx))}
+                          className="absolute -top-1.5 -right-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow-md cursor-pointer"
+                          title="Delete photo"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500 italic mt-1">No photos added yet. Upload venue images to attract players.</p>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowEditTurfModal(false);
+                    setEditingTurf(null);
+                  }}
+                  className="px-4 py-2.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading}
+                  className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-bold px-5 py-2.5 rounded-lg shadow-lg shadow-amber-950/50 cursor-pointer flex items-center gap-1.5"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>{actionLoading ? 'Saving Changes...' : 'Save Venue Changes'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {showAddArenaModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 max-w-md w-full shadow-2xl max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-white mb-1">
+              {arenaFacilityType === 'INDOOR_GAME'
+                ? 'Add Arena: Gaming Zone (Indoor)'
+                : 'Add Arena: Turf (Outdoor)'}
+            </h2>
+            <p className="text-xs text-slate-400 mb-5">Adding facility under {selectedTurf?.name}</p>
+
+            <form onSubmit={handleCreateArena} className="space-y-4">
+              {/* Prompt: Ask Owner whether it is Turf (Outdoor) or Gaming Zone (Indoor) */}
+              <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800">
+                <label className="block text-xs font-bold text-slate-200 mb-1">
+                  What type of arena are you adding?
+                </label>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  Choose between an outdoor turf pitch or an indoor gaming zone station.
+                </p>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setArenaFacilityType('OUTDOOR_TURF');
+                      setArenaName('Pitch B');
+                      setArenaCapacity(14);
+                      setArenaPrice(selectedTurf?.basePrice || 1500);
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col ${
+                      arenaFacilityType === 'OUTDOOR_TURF'
+                        ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 ring-1 ring-emerald-500/50'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="font-bold text-xs text-white flex items-center gap-1.5">
+                      <span>🌿</span> Turf (Outdoor)
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-1">Football, Cricket, Tennis</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setArenaFacilityType('INDOOR_GAME');
+                      setArenaName('Table #1 - 8-Ball Pool');
+                      setArenaIndoorGame('Pool');
+                      setArenaCapacity(4);
+                      setArenaPrice(220);
+                      setArenaEquipment(['2 Ash Wood Cues', 'Pioneer Chalk', 'Triangle Rack', 'Pro Ball Set']);
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col ${
+                      arenaFacilityType === 'INDOOR_GAME'
+                        ? 'bg-amber-500/15 border-amber-500 text-amber-300 ring-1 ring-amber-500/50'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="font-bold text-xs text-white flex items-center gap-1.5">
+                      <span>🎮</span> Gaming Zone (Indoor)
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-1">Pool, TT, Carrom, PS5</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Conditional Configuration based on Turf (Outdoor) vs Gaming Zone (Indoor) */}
+              {arenaFacilityType === 'INDOOR_GAME' ? (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Indoor Game / Station Type *
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { id: 'Pool', label: '🎱 Snooker & Pool', defaultTitle: 'Table #1 - 8-Ball Pool', defaultPrice: 220, defaultEquip: ['2 Ash Wood Cues', 'Pioneer Chalk', 'Triangle Rack'] },
+                        { id: 'Table Tennis', label: '🏓 Table Tennis', defaultTitle: 'Table #1 - ITTF Pro TT', defaultPrice: 180, defaultEquip: ['4 Stiga Allround Bats', '6 3-Star Balls'] },
+                        { id: 'Carrom', label: '🎯 Carrom & Boards', defaultTitle: 'Board A - Champion Hardwood', defaultPrice: 120, defaultEquip: ['Wooden Coins Set', 'Tournament Striker', 'Boroc Powder'] },
+                        { id: 'Foosball', label: '⚽ Foosball & Arcade', defaultTitle: 'Table 1 - 4-Player Foosball', defaultPrice: 150, defaultEquip: ['3 Match Cork Balls', 'Score Tracker'] },
+                        { id: 'Console PS5', label: '🎮 Console PS5 Lounge', defaultTitle: 'Pod #1 - PS5 4K Recliner', defaultPrice: 300, defaultEquip: ['EA Sports FC 25', '4 DualSense Wireless Controllers'] },
+                      ].map((game) => {
+                        const isSelected = arenaIndoorGame === game.id;
+                        return (
+                          <button
+                            key={game.id}
+                            type="button"
+                            onClick={() => {
+                              setArenaIndoorGame(game.id);
+                              setArenaName(game.defaultTitle);
+                              setArenaPrice(game.defaultPrice);
+                              setArenaEquipment(game.defaultEquip);
+                            }}
+                            className={`text-left px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-amber-500/20 border-amber-400 text-amber-200'
+                                : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                            }`}
+                          >
+                            {isSelected ? '✓ ' : ''}{game.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Station / Table Name or Number *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={arenaName}
+                      onChange={(e) => setArenaName(e.target.value)}
+                      placeholder="e.g. Table #1 - 8-Ball Tournament Pool"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">Max Players (Capacity)</label>
+                      <input
+                        type="number"
+                        value={arenaCapacity}
+                        onChange={(e) => setArenaCapacity(Number(e.target.value))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">Hourly Price (₹)</label>
+                      <input
+                        type="number"
+                        value={arenaPrice}
+                        onChange={(e) => setArenaPrice(Number(e.target.value))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Amenities */}
+                  <div className="flex gap-4 p-3 bg-slate-950 border border-slate-800 rounded-xl">
+                    <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={arenaHasAC}
+                        onChange={(e) => setArenaHasAC(e.target.checked)}
+                        className="rounded border-slate-700 text-amber-500 focus:ring-amber-500"
+                      />
+                      <span>❄️ Air Conditioned</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={arenaHasLounge}
+                        onChange={(e) => setArenaHasLounge(e.target.checked)}
+                        className="rounded border-slate-700 text-amber-500 focus:ring-amber-500"
+                      />
+                      <span>🛋️ Sofa Lounge Access</span>
+                    </label>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Arena Name *</label>
+                    <input
+                      type="text"
+                      required
+                      value={arenaName}
+                      onChange={(e) => setArenaName(e.target.value)}
+                      placeholder="e.g. Arena 2 - Box Cricket Court"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Supported Sports (Multi-Select)
+                    </label>
+                    <p className="text-[11px] text-slate-400 mb-2">
+                      Select all sports playable on this physical ground (e.g., Football + Cricket share one schedule).
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { id: 'Football', label: '⚽ Football / Turf Soccer' },
+                        { id: 'Cricket', label: '🏏 Box Cricket' },
+                        { id: 'Badminton', label: '🏸 Badminton' },
+                        { id: 'Tennis', label: '🎾 Tennis' },
+                        { id: 'Pickleball', label: '🏓 Pickleball' },
+                        { id: 'Basketball', label: '🏀 Basketball' },
+                      ].map((s) => {
+                        const isSelected = arenaSports.includes(s.id);
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => {
+                              if (arenaSports.includes(s.id)) {
+                                if (arenaSports.length === 1) return;
+                                setArenaSports(arenaSports.filter((item) => item !== s.id));
+                              } else {
+                                setArenaSports([...arenaSports, s.id]);
+                              }
+                            }}
+                            className={`text-left px-3 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-sky-500/20 border-sky-400 text-sky-200'
+                                : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
+                            }`}
+                          >
+                            {isSelected ? '✓ ' : ''}{s.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {arenaSports.length > 1 && (
+                      <div className="mt-2.5 p-2.5 rounded-xl bg-sky-950/40 border border-sky-500/30 text-[11px] text-sky-300 leading-relaxed">
+                        ⚡ <strong>Shared Ground:</strong> Players can book either {arenaSports.join(' or ')}. Booking one sport automatically locks the schedule so no other game can be booked at that time.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">Player Capacity</label>
+                      <input
+                        type="number"
+                        value={arenaCapacity}
+                        onChange={(e) => setArenaCapacity(Number(e.target.value))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">Pitch Price (₹)</label>
+                      <input
+                        type="number"
+                        value={arenaPrice}
+                        onChange={(e) => setArenaPrice(Number(e.target.value))}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
 
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
                 <button
@@ -2279,8 +4234,14 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         <RecurringSlotsModal
           isOpen={showRecurringSlotsModal}
           onClose={() => setShowRecurringSlotsModal(false)}
+          turf={selectedTurf || (turfs.length > 0 ? turfs[0] : undefined)}
           turfs={turfs}
+          arenas={arenas}
           onGenerated={async () => {
+            showToast('Recurring slots generated successfully!');
+            await loadData();
+          }}
+          onSlotsGenerated={async () => {
             showToast('Recurring slots generated successfully!');
             await loadData();
           }}
@@ -2288,18 +4249,66 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ currentTab, setC
         />
       )}
       {/* ================= MODAL: 7-DAY SLOT GENERATOR ================= */}
-      {showSevenDayModal && selectedTurf && arenas.length > 0 && (
+      {showSevenDayModal && (selectedTurf || turfs.length > 0) && (
         <SevenDaySlotsModal
           isOpen={showSevenDayModal}
           onClose={() => setShowSevenDayModal(false)}
-          turf={selectedTurf}
+          turf={selectedTurf || turfs[0]}
           arenas={arenas}
           onSlotsGenerated={async () => {
+            await loadData();
+            showToast('7-day slots generated successfully!');
+          }}
+          showToast={showToast}
+        />
+      )}
+      {/* ================= MODAL: EDIT ARENA / PITCH ================= */}
+      {showEditArenaModal && editingArena && (
+        <EditArenaModal
+          arena={editingArena}
+          isOpen={showEditArenaModal}
+          onClose={() => {
+            setShowEditArenaModal(false);
+            setEditingArena(null);
+          }}
+          onSuccess={async () => {
             await loadData();
           }}
           showToast={showToast}
         />
       )}
+      {/* ================= MODAL: OWNER BRAND PROFILE PREVIEW ================= */}
+      {isPreviewBrandOpen && brandProfile && (
+        <OwnerBrandProfileModal
+          brandProfile={brandProfile}
+          turfs={turfs}
+          onClose={() => setIsPreviewBrandOpen(false)}
+          onNavigateToBooking={(turfId) => {
+            setIsPreviewBrandOpen(false);
+            const targetTurf = turfs.find((t) => t.id === turfId);
+            if (targetTurf) {
+              handleSelectTurf(targetTurf);
+            }
+            setCurrentTab('slots');
+          }}
+          showToast={showToast}
+        />
+      )}
+
+      {/* ================= MODAL: SOCIAL PROFILE ================= */}
+      <SocialProfileModal
+        isOpen={!!viewUserProfileId}
+        onClose={() => setViewUserProfileId(null)}
+        userId={viewUserProfileId}
+        showToast={showToast}
+      />
+
+      {/* ================= MODAL: DIRECT MESSAGES INBOX ================= */}
+      <DirectMessagesInboxModal
+        isOpen={showDirectMessagesInboxModal}
+        onClose={() => setShowDirectMessagesInboxModal(false)}
+        showToast={showToast}
+      />
     </div>
   );
 };
